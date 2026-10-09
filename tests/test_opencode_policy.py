@@ -1,44 +1,78 @@
 """Tests for the native OpenCode OI agent and fail-closed permissions."""
 
+import fnmatch
 from pathlib import Path
 
 from oi_agent.opencode.policy import build_agent_config, build_permission_policy
 from oi_agent.opencode.prompt import build_prompt
 
 
+def _effective(policy: list[dict[str, str]], action: str, resource: str) -> str:
+    """Apply native v2 last-matching-rule-wins semantics to one request."""
+    outcome = "deny"
+    for rule in policy:
+        if rule["action"] not in (action, "*"):
+            continue
+        if fnmatch.fnmatchcase(resource, rule["resource"]) or rule["resource"] == "*":
+            outcome = rule["effect"]
+    return outcome
+
+
 def test_policy_is_read_only_and_repo_scoped(tmp_path):
-    """Only read/glob/list tools are allowed, grep and write tools are denied."""
-    root = (tmp_path / "repo").resolve()
-    policy = build_permission_policy(root)
-    assert policy["*"] == "deny"
-    for tool in ("read", "glob", "list"):
-        assert policy[tool]["*"] == "allow"
-    assert policy["read"][".env"] == "deny"
-    assert policy["read"][".git/**"] == "deny"
-    assert policy["read"]["**/*credentials*"] == "deny"
-    assert policy["read"]["**/*secret*"] == "deny"
-    assert policy["read"]["**/*token*"] == "deny"
-    assert policy["external_directory"] == "deny"
-    assert policy["lsp"] == "allow"
-    assert policy["grep"] == "deny"
-    assert policy["bash"] == "deny"
-    assert policy["edit"] == "deny"
-    assert policy["write"] == "deny"
+    """Read/glob are re-granted after the broad deny; everything else stays denied."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".git").mkdir()
+    policy = build_permission_policy(root.resolve())
+
+    # The broad deny comes first so it overrides the native allow-by-default
+    # base policy; later rules re-grant only what OI deliberately allows.
+    assert policy[0] == {"action": "*", "resource": "*", "effect": "deny"}
+    for action in ("read", "glob"):
+        assert {"action": action, "resource": "*", "effect": "allow"} in policy
+
+    # Secret and nested-git denies come after the broad allow, so the native
+    # last-match rule denies them despite the repository-wide read grant.
+    assert _effective(policy, "read", "src/main.py") == "allow"
+    assert _effective(policy, "read", ".env") == "deny"
+    assert _effective(policy, "read", "config/.env.production") == "deny"
+    assert _effective(policy, "read", "sub/.git/config") == "deny"
+    assert _effective(policy, "read", "deploy/server.pem") == "deny"
+    assert _effective(policy, "read", "ops/token-cache.json") == "deny"
+    assert _effective(policy, "glob", "*.env") == "deny"
+    assert _effective(policy, "glob", "docs/*.md") == "allow"
+
+    # v2 action names only: shell/subagent exist, bash/task/lsp do not. Grep
+    # and list are discovery tools too, but OI never re-grants them, so the
+    # broad deny keeps them closed.
+    for action in (
+        "shell", "subagent", "skill", "question", "webfetch", "websearch",
+        "execute", "edit", "grep", "list", "bash", "task", "lsp", "mcp",
+    ):
+        assert not any(
+            rule["action"] == action and rule["effect"] == "allow"
+            for rule in policy
+        ), action
+    assert _effective(policy, "edit", "README.md") == "deny"
+    assert {"action": "external_directory", "resource": "*", "effect": "deny"} in policy
 
 
 def test_native_agent_has_steps_model_and_inline_prompt(tmp_path):
-    """Agent configuration is native OpenCode JSON, not a linked skill."""
+    """Agent configuration is native OpenCode v2 JSON, not a linked skill."""
     prompt = build_prompt("brief and precise")
     config = build_agent_config(
         "provider/model", 30, Path(tmp_path), prompt
     )
-    agent = config["agent"]["oi"]
+    assert config["permissions"] == [{"action": "*", "resource": "*", "effect": "deny"}]
+    assert config["snapshot"] is False
+    assert config["formatter"] is False
+    agent = config["agents"]["oi"]
     assert agent["mode"] == "primary"
     assert agent["model"] == "provider/model"
     assert agent["steps"] == 30
-    assert agent["permission"]["*"] == "deny"
-    assert "brief and precise" in agent["prompt"]
-    assert "never override safety" in agent["prompt"].lower()
+    assert agent["permissions"][0] == {"action": "*", "resource": "*", "effect": "deny"}
+    assert "brief and precise" in agent["system"]
+    assert "never override safety" in agent["system"].lower()
 
 
 def test_prompt_renders_ground_truth_identity_block():

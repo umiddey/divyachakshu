@@ -1,5 +1,6 @@
 """Tests for the opt-in docs-only write mode (.md/.txt + folder gate)."""
 
+import fnmatch
 import shutil
 import subprocess
 import time
@@ -17,6 +18,17 @@ from oi_agent.opencode.policy import (
 )
 from oi_agent.opencode.prompt import build_prompt
 from oi_agent.opencode.runner import _collect_doc_attachments
+
+
+def _effective(policy: list[dict[str, str]], action: str, resource: str) -> str:
+    """Apply native v2 last-matching-rule-wins semantics to one request."""
+    outcome = "deny"
+    for rule in policy:
+        if rule["action"] not in (action, "*"):
+            continue
+        if fnmatch.fnmatchcase(resource, rule["resource"]) or rule["resource"] == "*":
+            outcome = rule["effect"]
+    return outcome
 
 
 def _binary() -> str:
@@ -48,56 +60,89 @@ def _git_repo(tmp_path: Path) -> Path:
 
 
 def test_docs_only_allows_md_txt_and_denies_code(tmp_path):
-    """Docs-only grants edit/write for .md/.txt; code and tools stay denied."""
-    policy = build_permission_policy(tmp_path, write_mode="docs-only")
-    assert policy["*"] == "deny"
-    for tool in ("edit", "write"):
-        rules = policy[tool]
-        assert rules["*"] == "deny"
-        assert rules["**/*.md"] == "allow"
-        assert rules["**/*.txt"] == "allow"
-        assert rules[".env"] == "deny"
-        assert rules[".git/**"] == "deny"
-    assert policy["bash"] == "deny"
-    assert policy["patch"] == "deny"
-    assert policy["read"]["*"] == "allow"
+    """Docs-only grants .md/.txt edits; code, secrets, and other tools stay denied."""
+    repo = _git_repo(tmp_path)
+    policy = build_permission_policy(repo, write_mode="docs-only")
+    assert policy[0] == {"action": "*", "resource": "*", "effect": "deny"}
+    assert _effective(policy, "edit", "notes/plan.md") == "allow"
+    assert _effective(policy, "edit", "notes/plan.txt") == "allow"
+    assert _effective(policy, "edit", "src/app.py") == "deny"
+    assert _effective(policy, "edit", ".env") == "deny"
+    assert _effective(policy, "edit", "sub/.git/config") == "deny"
+    assert _effective(policy, "shell", "*") == "deny"
+    assert _effective(policy, "webfetch", "*") == "deny"
+    assert _effective(policy, "subagent", "*") == "deny"
+    # Repository reads stay granted under docs-only mode.
+    assert _effective(policy, "read", "src/main.py") == "allow"
 
 
 def test_docs_only_folder_gate_narrows_scope(tmp_path):
-    """With write_dirs set, .md outside the scope is not allowed."""
+    """With write_dirs set, only inside that directory is granted.
+
+    The boundary pattern is ``<scope>/*<ext>``. Because ``*`` spans ``/`` it
+    covers nested files, but a sibling directory sharing the text prefix
+    (``docs-private/`` when the scope is ``docs``) must never match: the
+    parent's real native red proved the old ``<scope>*<ext>`` prefix grant
+    created ``docs-private/scope-test.md``.
+    """
+    repo = _git_repo(tmp_path)
     policy = build_permission_policy(
-        tmp_path, write_mode="docs-only", write_dirs=["docs/plans"]
+        repo, write_mode="docs-only", write_dirs=["docs"]
     )
-    rules = policy["edit"]
-    assert rules["*"] == "deny"
-    assert rules["docs/plans/**/*.md"] == "allow"
-    assert rules["docs/plans/**/*.txt"] == "allow"
-    assert "**/*.md" not in rules
-    assert "**/*.txt" not in rules
+    assert _effective(policy, "edit", "docs/plan.md") == "allow"
+    assert _effective(policy, "edit", "docs/deep/note.md") == "allow"
+    assert _effective(policy, "edit", "docs/plan.txt") == "allow"
+    assert _effective(policy, "edit", "docs-private/plan.md") == "deny"
+    assert _effective(policy, "edit", "docs-private/scope-test.md") == "deny"
+    assert _effective(policy, "edit", "root.md") == "deny"
+    assert not any(
+        rule["action"] == "edit" and rule["effect"] == "allow"
+        and fnmatch.fnmatchcase("docs-private/plan.md", rule["resource"])
+        for rule in policy
+    )
+
+
+def test_docs_only_without_provable_location_boundary_denies_all(tmp_path):
+    """A Location that is not a worktree root grants no edits, scoped or not."""
+    for kwargs in ({}, {"write_dirs": ["docs"]}):
+        policy = build_permission_policy(tmp_path, write_mode="docs-only", **kwargs)
+        assert _effective(policy, "edit", "plan.md") == "deny"
+        assert _effective(policy, "edit", "docs/plan.md") == "deny"
+        assert _effective(policy, "edit", "docs/../escape.md") == "deny"
 
 
 def test_unknown_write_mode_fails_closed_to_read_only(tmp_path):
-    """Anything but docs-only keeps edit/write denied."""
+    """Anything but docs-only keeps every edit denied."""
     policy = build_permission_policy(tmp_path, write_mode="bogus")
-    assert policy["edit"] == "deny"
-    assert policy["write"] == "deny"
+    assert _effective(policy, "edit", "plan.md") == "deny"
+    assert not any(
+        rule["action"] == "edit" and rule["effect"] == "allow" for rule in policy
+    )
 
 
-def test_normalize_write_dirs_drops_escapes():
-    """Traversal, absolute, and empty scopes never widen the allow set."""
+def test_normalize_write_dirs_never_widens():
+    """Valid scopes are cleaned; an all-invalid scope refuses to widen."""
     assert normalize_write_dirs(["docs/plans/", "docs/memory"]) == ["docs/plans", "docs/memory"]
-    assert normalize_write_dirs(["../evil", "/abs", ".", "", None]) == []  # type: ignore[list-item]
-    assert normalize_write_dirs(None) == []
+    assert normalize_write_dirs(["docs"]) == ["docs"]
+    assert normalize_write_dirs(None) is None
+    assert normalize_write_dirs([]) is None
+    with pytest.raises(ValueError, match="refusing to widen"):
+        normalize_write_dirs(["../evil", "/abs", ".", "", None])  # type: ignore[list-item]
 
 
 def test_agent_config_carries_docs_only_description(tmp_path):
-    """Agent description reflects the granted mode."""
+    """Agent description reflects the granted mode, on the v2 agents map."""
+    repo = _git_repo(tmp_path)
     prompt = build_prompt("voice")
-    ro = build_agent_config("p/m", 10, tmp_path, prompt)["agent"]["oi"]
-    docs = build_agent_config("p/m", 10, tmp_path, prompt, write_mode="docs-only")["agent"]["oi"]
+    ro = build_agent_config("p/m", 10, repo, prompt)["agents"]["oi"]
+    docs = build_agent_config("p/m", 10, repo, prompt, write_mode="docs-only")["agents"]["oi"]
     assert "Read-only" in ro["description"]
     assert "docs-only" in docs["description"]
-    assert docs["permission"]["edit"]["**/*.md"] == "allow"
+    assert {"action": "edit", "resource": "*.md", "effect": "allow"} in docs["permissions"]
+    assert not any(
+        rule["action"] == "edit" and rule["effect"] == "allow"
+        for rule in ro["permissions"]
+    )
 
 
 # --- prompt ---------------------------------------------------------------

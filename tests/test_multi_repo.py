@@ -9,6 +9,7 @@ and interactive CLI management.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import stat
 import subprocess
 import sys
@@ -28,6 +29,17 @@ from oi_agent.opencode.runner import OpenCodeRunner
 from oi_agent.poster import DeliveryResult
 from oi_agent.store import Store
 from oi_agent.watch.discord_client import OIWatcher
+
+
+def _effective(policy: list[dict[str, str]], action: str, resource: str) -> str:
+    """Apply native v2 last-matching-rule-wins semantics to one request."""
+    outcome = "deny"
+    for rule in policy:
+        if rule["action"] not in (action, "*"):
+            continue
+        if fnmatch.fnmatchcase(resource, rule["resource"]) or rule["resource"] == "*":
+            outcome = rule["effect"]
+    return outcome
 
 # ==============================================================================
 # Helper Mock Classes
@@ -292,42 +304,49 @@ def test_validate_config_directly_constructed_targets_hardening():
 # 2. Multi-Root Permission Policy & Secret Isolation
 # ==============================================================================
 
-def test_secret_denial_covers_read_glob_and_list_across_all_roots():
-    """Verify secret deny patterns are strictly enforced across read, glob, list for primary & auxiliary roots."""
-    primary = Path("/home/user/work/repo-main")
-    aux = Path("/home/user/work/repo-aux")
+def test_restricted_path_denials_cover_read_glob_and_all_roots(tmp_path):
+    """Secret/nested-git denies hold for read and glob on primary and auxiliary roots."""
+
+    def _git_root(name: str) -> Path:
+        repo = tmp_path / name
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        return repo
+
+    primary = _git_root("primary")
+    aux = _git_root("aux")
 
     policy = build_permission_policy(primary, additional_repo_roots=[aux])
+    aux_str = str(aux.resolve())
 
-    # Check read, glob, and list all have secret blocking
-    for tool in ("read", "glob", "list"):
-        tool_rules = policy[tool]
-        assert isinstance(tool_rules, dict)
-        assert tool_rules["*"] == "allow"
-        assert tool_rules[".git/**"] == "deny"
-        assert tool_rules[".env"] == "deny"
-        assert tool_rules["**/.env"] == "deny"
-        assert tool_rules["**/.env.*"] == "deny"
-        assert tool_rules["**/*secret*"] == "deny"
+    for action in ("read", "glob"):
+        assert _effective(policy, action, "src/main.py") == "allow"
+        assert _effective(policy, action, ".env") == "deny"
+        assert _effective(policy, action, "deploy/config.env") == "deny"
+        assert _effective(policy, action, "sub/.git/config") == "deny"
+        assert _effective(policy, action, "ops/credentials.json") == "deny"
+        # Auxiliary absolute paths get the same protection.
+        assert _effective(policy, action, f"{aux_str}/src/main.py") == "allow"
+        assert _effective(policy, action, f"{aux_str}/.env") == "deny"
+        assert _effective(policy, action, f"{aux_str}/sub/.git/config") == "deny"
+        assert _effective(policy, action, f"{aux_str}/secrets/api.key") == "deny"
 
-        # Auxiliary absolute paths must also be protected
-        aux_str = str(aux.resolve())
-        assert tool_rules[f"{aux_str}/.git/**"] == "deny"
-        assert tool_rules[f"{aux_str}/.env"] == "deny"
-        assert tool_rules[f"{aux_str}/**/.env"] == "deny"
+    # Mutations, shells, and network stay denied outright.
+    for action in ("edit", "shell", "subagent", "webfetch", "websearch", "execute"):
+        assert not any(
+            rule["action"] == action and rule["effect"] == "allow" for rule in policy
+        ), action
 
-    # Mutations must be denied
-    assert policy["edit"] == "deny"
-    assert policy["write"] == "deny"
-    assert policy["bash"] == "deny"
-    assert policy["mcp"] == "deny"
-
-    # External directory must grant access to auxiliary root
-    ext = policy["external_directory"]
-    assert isinstance(ext, dict)
-    assert ext["*"] == "deny"
-    assert ext[str(aux.resolve())] == "allow"
-    assert ext[f"{aux.resolve()}/**"] == "allow"
+    # The auxiliary root is an explicit external_directory boundary.
+    assert {"action": "external_directory", "resource": f"{aux_str}/*", "effect": "allow"} in policy
+    # An auxiliary root that is not its own worktree root is never granted.
+    orphan = tmp_path / "plain-subdir"
+    orphan.mkdir()
+    naked = build_permission_policy(primary, additional_repo_roots=[orphan])
+    assert not any(
+        rule["action"] == "external_directory" and rule["effect"] == "allow"
+        for rule in naked
+    )
 
 
 # ==============================================================================

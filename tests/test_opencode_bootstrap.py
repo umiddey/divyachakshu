@@ -16,16 +16,38 @@ def test_installed_binary_version_is_verified():
     assert version.version >= bootstrap.MIN_OPENCODE_VERSION
 
 
-def test_old_binary_version_rejected(monkeypatch):
-    """Versions older than 1.18.0 fail compatible check."""
+def test_unsupported_major_versions_rejected(monkeypatch):
+    """v1 and any unknown future major are rejected, never run under ignored policy."""
+    for raw in ("opencode 1.10.0\n", "opencode 1.18.0\n", "opencode 3.1.4\n"):
+        monkeypatch.setattr(
+            bootstrap.subprocess,
+            "run",
+            lambda *args, raw=raw, **kwargs: SimpleNamespace(
+                returncode=0, stdout=raw
+            ),
+        )
+        with pytest.raises(
+            bootstrap.OpenCodeBootstrapError,
+            match="not a supported native v2 release",
+        ):
+            bootstrap.check_version("opencode", resolve_opencode_paths())
+
+
+def test_minimum_v2_version_accepted_and_enforced(monkeypatch):
+    """A current v2 release parses; a pre-minimum v2 release is too old."""
     monkeypatch.setattr(
         bootstrap.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            returncode=0, stdout="opencode 1.10.0\n"
-        ),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="opencode 2.0.5\n"),
     )
-    with pytest.raises(bootstrap.OpenCodeBootstrapError, match="too old"):
+    assert bootstrap.check_version("opencode", resolve_opencode_paths()).version == (2, 0, 5)
+
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="opencode 1.99.9\n"),
+    )
+    with pytest.raises(bootstrap.OpenCodeBootstrapError, match="not a supported native v2"):
         bootstrap.check_version("opencode", resolve_opencode_paths())
 
 
