@@ -11,6 +11,7 @@ import signal
 import subprocess
 import time
 from contextlib import AsyncExitStack
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,12 @@ if TYPE_CHECKING:
 
 from ..agent.reply import Reply
 from ..config import Config, WatchTarget
+from ..external.prepare import PreparedExternal
+from ..external.records import (
+    STATUS_IMAGE,
+    STATUS_UNSUPPORTED,
+    AttachmentInput,
+)
 from ..watch.context_request import (
     ContextRequest,
     mentions_expansion,
@@ -27,9 +34,23 @@ from ..watch.context_request import (
     parse_spec,
 )
 from .bootstrap import resolve_binary
+from .native import (
+    DisposableNativeRoot,
+    NativeCompletion,
+    build_argv,
+    config_content,
+    copy_isolated_credentials,
+    initialize_native_schema,
+    native_db_path,
+    verify_completion,
+)
 from .paths import resolve_opencode_paths
-from .policy import build_agent_config, normalize_write_dirs
-from .prompt import FINAL_OUTPUT_MARKER, build_prompt
+from .policy import (
+    build_agent_config,
+    build_tool_free_agent,
+    normalize_write_dirs,
+)
+from .prompt import FINAL_OUTPUT_MARKER, build_prompt, render_evidence_block
 from .provenance import audit_sha, git_pull, mutation_warning, worktree_fingerprint
 from .review_snapshots import ReviewSnapshot, ReviewSnapshotError, materialized_review
 from .review_target import (
@@ -285,108 +306,136 @@ _ANSWER_COMPLETED_REASON = "stop"
 _TOOL_CALLS_REASON = "tool-calls"
 
 
-def _select_final_text(
-    events: list[dict[str, Any]],
-    *,
-    allow_unfinished: bool = False,
-) -> tuple[str, str | None, str | None, int]:
-    """Select a completed answer, optionally accepting one clean terminal text event.
 
-    Normal OI streams require a ``step_finish(reason="stop")`` event. Some
-    OpenCode standalone streams end after one visible text event; callers
-    may opt into accepting that exact single-message shape.
+def _stream_identity(
+    events: list[dict[str, Any]],
+) -> tuple[str | None, str | None, bool]:
+    """Return ``(session_id, last_text_message_id, had_error_event)``.
+
+    These are the exact identifiers completion proof is bound to. Only
+    metadata is read: no text, no tool input, no tool output.
+    """
+    session_id: str | None = None
+    message_id: str | None = None
+    had_error = False
+    for event in events:
+        session_id = event.get("sessionID") or session_id
+        event_type = event.get("type")
+        if event_type == "error":
+            had_error = True
+            continue
+        part = event.get("part")
+        if isinstance(part, dict) and event_type == "text":
+            candidate = part.get("messageID")
+            if isinstance(candidate, str) and candidate:
+                message_id = candidate
+    return session_id, message_id, had_error
+
+
+
+
+
+def _select_final_text_v2(
+    events: list[dict[str, Any]],
+    completion: NativeCompletion,
+) -> tuple[str, str | None, str | None, int]:
+    """Select the one completed native v2 answer, bound to native proof.
+
+    Native v2 ``run --format json`` does NOT emit a terminal ``step_finish``
+    for the final assistant answer, so the v1 selector can never see a
+    completed answer on a working v2 install. Accepting a bare text event
+    instead would make truncated or narration text deliverable, so completion
+    is required as an input: the caller proves from native state that the
+    exact message the CLI last reported really finished with ``stop``.
+
+    The stream envelope is validated exactly as strictly as before (known
+    event types, well-formed parts, consistent part ids, no text after a
+    closed message), so a malformed or injected stream still fails closed.
+    Narration messages from tool steps are structurally excluded: only the
+    message the CLI reported last, and only if it is the final message in the
+    stream, can contribute text.
 
     Args:
         events: Parsed JSONL events in stream order.
-        allow_unfinished: Accept one unclosed visible-text message.
+        completion: Authoritative native completion proof for the run.
 
     Returns:
-        Tuple of final text, session id, bounded error class, and visible part count.
+        Tuple of final text, session id, bounded error class, and visible
+        part count.
     """
     session_id: str | None = None
-    error_class: str | None = None
     text_parts = 0
-    # messageID -> {"by_id": {part id: text}, "order": [part ids],
-    #               "reason": str, "finished": bool}
     messages: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-
-    def fail(protocol_class: str) -> tuple[str, str | None, str | None, int]:
-        return "", session_id, error_class or protocol_class, text_parts
+    last_text_message: str | None = None
+    stream_error: str | None = None
 
     for event in events:
         session_id = event.get("sessionID") or session_id
         event_type = event.get("type")
         if event_type not in _KNOWN_EVENT_TYPES:
-            return fail("protocol_unknown_event")
+            return "", session_id, "protocol_unknown_event", 0
         if event_type == "error":
-            error_class = error_class or _error_class(event)
+            stream_error = stream_error or _error_class(event)
             continue
         part = event.get("part")
         if not isinstance(part, dict):
-            return fail("protocol_malformed_part")
+            return "", session_id, "protocol_malformed_part", 0
         message_id = part.get("messageID")
         if not isinstance(message_id, str) or not message_id:
-            return fail("protocol_missing_message_id")
+            return "", session_id, "protocol_missing_message_id", 0
         message = messages.get(message_id)
         if message is None:
-            message = {"by_id": {}, "order": [], "reason": None, "finished": False}
+            message = {"by_id": {}, "order": [], "closed": False}
             messages[message_id] = message
             order.append(message_id)
         if event_type == "step_finish":
             reason = part.get("reason")
             if not isinstance(reason, str) or not reason:
-                return fail("protocol_malformed_part")
-            message["reason"] = reason
-            message["finished"] = True
+                return "", session_id, "protocol_malformed_part", 0
+            if reason not in (_ANSWER_COMPLETED_REASON, _TOOL_CALLS_REASON):
+                return "", session_id, "protocol_incomplete_final", 0
+            message["closed"] = True
         elif event_type == "text":
-            if message["finished"]:
-                # The message was closed by its step_finish; any further text
-                # for the same messageID is a malformed/hacked stream and must
-                # never contribute partial text to a reply (fail closed).
-                return fail("protocol_malformed_part")
+            if message["closed"]:
+                # Text after the message was closed is a malformed or hacked
+                # stream and must never reach a reply.
+                return "", session_id, "protocol_malformed_part", 0
             if part.get("synthetic") or part.get("ignored"):
                 continue
             text = part.get("text")
             part_id = part.get("id")
             if not isinstance(text, str) or not isinstance(part_id, str) or not part_id:
-                return fail("protocol_malformed_part")
+                return "", session_id, "protocol_malformed_part", 0
             existing = message["by_id"].get(part_id)
             if existing is not None:
                 if existing != text:
-                    return fail("protocol_conflicting_part")
+                    return "", session_id, "protocol_conflicting_part", 0
                 continue
             message["by_id"][part_id] = text
             message["order"].append(part_id)
             text_parts += 1
+            last_text_message = message_id
         # step_start, reasoning, and tool_use parts only advance lifecycle.
 
-    candidates = [
-        message_id for message_id in order
-        if messages[message_id]["reason"] == _ANSWER_COMPLETED_REASON
-        and messages[message_id]["order"]
-    ]
-    if len(candidates) > 1:
-        return fail("protocol_ambiguous_final")
-    if len(candidates) == 1:
-        final = messages[candidates[0]]
-        text = "".join(final["by_id"][pid] for pid in final["order"]).strip()
-        return text, session_id, error_class, text_parts
-    if allow_unfinished and error_class is None:
-        open_candidates = [
-            message_id for message_id in order
-            if messages[message_id]["reason"] is None
-            and messages[message_id]["order"]
-        ]
-        if len(open_candidates) == 1:
-            final = messages[open_candidates[0]]
-            text = "".join(final["by_id"][pid] for pid in final["order"]).strip()
-            return text, session_id, None, text_parts
-    for message_id in order:
-        reason = messages[message_id]["reason"]
-        if reason not in (None, _ANSWER_COMPLETED_REASON, _TOOL_CALLS_REASON):
-            return fail("protocol_incomplete_final")
-    return fail("protocol_no_final_message")
+    if stream_error is not None:
+        return "", session_id, stream_error, 0
+    if not completion.completed:
+        return "", session_id, completion.error_class or "protocol_no_final_message", 0
+    if last_text_message is None:
+        return "", session_id, "protocol_no_final_message", 0
+    # The natively-proven message must be exactly the last message that
+    # produced text, and it must be the final message in the stream: a
+    # trailing message native state never confirmed must not become the
+    # deliverable answer.
+    if completion.message_id and last_text_message != completion.message_id:
+        return "", session_id, "protocol_ambiguous_final", 0
+    if order[-1] != last_text_message:
+        return "", session_id, "protocol_ambiguous_final", 0
+    final = messages[last_text_message]
+    text = "".join(final["by_id"][pid] for pid in final["order"]).strip()
+    return text, session_id, None, text_parts
+
 
 def _extract_marked_answer(text: str) -> tuple[str, str | None]:
     """Return text after the last explicit final-output marker."""
@@ -474,10 +523,11 @@ def _review_prompt_section(snapshot: ReviewSnapshot) -> str:
 TRUNCATION_MARKER = "\n\n[reply truncated]"
 
 
+
 def _truncate_cut(text: str, limit: int) -> int:
     """Return the best cut index at or below ``limit``.
 
-    Boundary preference: paragraph (``\\n\\n``), then sentence (``.``/``!``/
+    Boundary preference: paragraph (``\n\n``), then sentence (``.``/``!``/
     ``?`` followed by whitespace), then any whitespace; ``limit`` itself only
     when the text contains no boundary at all.
 
@@ -488,6 +538,7 @@ def _truncate_cut(text: str, limit: int) -> int:
     Returns:
         Cut index in ``[0, limit]``.
     """
+
     paragraph = text.rfind("\n\n", 0, limit)
     if paragraph != -1:
         return paragraph
@@ -606,6 +657,32 @@ def _collect_doc_attachments(
     return tuple(sorted(set(found))[:MAX_DOC_ATTACHMENTS])
 
 
+def _demote_images_without_vision(prepared: PreparedExternal) -> None:
+    """Rewrite prepared image records to explicit unsupported statuses.
+
+    Used when ``image_inputs="off"``: native catalog assumptions are not
+    detection, so the controller does not hand pixels to the model. Each
+    image record becomes an explicit unsupported entry stating that visual
+    understanding is unavailable, while independent text and document parts
+    still reach the model and no whole job fails merely because an image
+    could not be shown.
+    """
+    rewritten: list[AttachmentInput] = []
+    for record in prepared.inputs.attachments:
+        if record.kind == "image" and record.status == STATUS_IMAGE:
+            rewritten.append(_dc_replace(
+                record,
+                status=STATUS_UNSUPPORTED,
+                limitations=(
+                    "not shown: model image capability is not enabled "
+                    "(image_inputs=off); visual understanding is unavailable",
+                ),
+            ))
+        else:
+            rewritten.append(record)
+    prepared.inputs.attachments = rewritten
+
+
 class OpenCodeRunner:
     """Run the configured native OI OpenCode agent for one conversation."""
 
@@ -690,12 +767,17 @@ class OpenCodeRunner:
         *,
         system_prompt: str = "",
         timeout: int = 60,
-        allow_unfinished: bool = False,
     ) -> str | None:
-        """Execute a raw model query without repository tool access.
+        """Execute a raw model query with no tools at all.
+
+        The interpretation agent runs under the native v2 contract with every
+        action denied, so it has no repository, network, or filesystem
+        authority. The answer is returned only when native state proves the
+        reported message actually completed.
 
         Args:
-            allow_unfinished: Accept one clean terminal text event from standalone OpenCode.
+            system_prompt: Optional override for the default JSON instruction.
+            timeout: Wall-clock bound in seconds.
 
         Raises:
             ValueError: When the prompt exceeds the bounded stdin limit.
@@ -714,32 +796,14 @@ class OpenCodeRunner:
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return None
 
-        agent_def = {
-            "agent": {
-                "oi_eval": {
-                    "description": "Evaluation agent",
-                    "mode": "primary",
-                    "model": self._cfg.opencode_model,
-                    "prompt": system_prompt or "You are a helpful JSON analysis agent. Output valid JSON.",
-                    "steps": 1,
-                    "permission": {"*": "deny"},
-                }
-            }
-        }
-        config_content = json.dumps(agent_def, separators=(",", ":"))
-        argv = [
-            binary,
-            "run",
-            "--standalone",
-            "--format",
-            "json",
-            "--model",
+        agent_document = build_tool_free_agent(
             self._cfg.opencode_model,
-            "--agent",
-            "oi_eval",
-        ]
+            system_prompt or "You are a helpful JSON analysis agent. Output valid JSON.",
+        )
+        argv = [binary, *build_argv(self._cfg.opencode_model, "oi_eval")]
         environment = paths.environment()
-        environment["OPENCODE_CONFIG_CONTENT"] = config_content
+        environment["OPENCODE_CONFIG_CONTENT"] = config_content(agent_document)
+        db_path = native_db_path(paths.data_home)
 
         process = None
         stdout_task = None
@@ -751,6 +815,7 @@ class OpenCodeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=environment,
+                cwd=str(Path.home()),
                 start_new_session=(os.name == "posix"),
             )
             assert process.stdin is not None
@@ -765,9 +830,12 @@ class OpenCodeRunner:
                 timeout=timeout,
             )
             events, _ = stdout_task.result()
-            text, _, selection_error, _ = _select_final_text(
-                events, allow_unfinished=allow_unfinished
+            session_id, message_id, had_error = _stream_identity(events)
+            completion = verify_completion(
+                db_path, session_id, message_id,
+                returncode=process.returncode, has_error_event=had_error,
             )
+            text, _, selection_error, _ = _select_final_text_v2(events, completion)
             if selection_error is None and text:
                 return text
             return None
@@ -810,7 +878,6 @@ class OpenCodeRunner:
             text = await self.run_raw_prompt(
                 _context_spec_prompt() + question.strip(),
                 timeout=45,
-                allow_unfinished=True,
             )
         except ValueError:
             return None
@@ -824,6 +891,188 @@ class OpenCodeRunner:
             request.since_date,
         )
         return request
+
+    def _vision_attachments(self, prepared: PreparedExternal) -> list[Path]:
+        """Return native image paths under the validated capability setting.
+
+        ``image_inputs="on"`` attaches the prepared image files through the
+        documented ``--file`` flags so the model receives real pixels.
+        ``image_inputs="off"`` (the conservative default) attaches nothing:
+        the image records are demoted to explicit unsupported statuses so the
+        prompt honestly states visual understanding is unavailable, and the
+        run still answers independent text and document parts.
+        """
+        preparation = prepared.image_preparation
+        if preparation is None or not preparation.images:
+            return []
+        if self._cfg.image_inputs != "on":
+            _demote_images_without_vision(prepared)
+            return []
+        return list(preparation.paths)
+
+    async def run_external_evidence(
+        self,
+        prepared: PreparedExternal,
+        *,
+        target: WatchTarget,
+        author: str,
+        question: str,
+        excerpt: str,
+        bot_name: str = "",
+        bot_id: int | None = None,
+    ) -> Reply:
+        """Answer an external-evidence question in a disposable read-only run.
+
+        External runs differ from ordinary audits in five structural ways, all
+        of which are properties of this method rather than of the prompt:
+
+        * **Read-only regardless of ``write_mode``.** External content is
+          untrusted; a run that carries it never receives a docs-only grant.
+        * **Fresh disposable native storage.** HOME, XDG config/data/state/
+          cache, and TMPDIR are private and deleted afterwards, because the
+          native harness persists prompt text and attachment bytes. No
+          conversation session is resumed and no session id is returned, so
+          nothing is ever stored under a conversation key.
+        * **Minimal credential material only.** The already-isolated OI native
+          database's credential rows are copied into the private root; no
+          session, message, project, or permission row is copied, no personal
+          auth is read, and no permission rule grants the model access to
+          those paths.
+        * **Real images.** Prepared image paths are attached through the
+          documented native ``--file`` flag, so the model receives pixels.
+        * **Honest limits.** Unsupported inputs, clipped evidence, and
+          retrieval refusals are stated in the prompt so the model reports the
+          real limitation instead of inventing content.
+
+        Args:
+            prepared: Controller-prepared evidence and attachments.
+            root: Repository used as the native working directory.
+            author: Discord display name.
+            question: Latest user question.
+            excerpt: Bounded Discord conversation excerpt.
+            bot_name: Discord display name the agent posts under.
+            bot_id: Stable Discord user id of the bot account.
+
+        Returns:
+            A bounded Reply. External runs never carry a resumable session.
+        """
+        inputs = prepared.inputs
+        if not inputs.has_external_content:
+            return _failure("none", "no_external_content")
+        try:
+            binary = resolve_binary(self._cfg.opencode_binary)
+        except Exception:  # noqa: BLE001 - config/bootstrap boundary
+            return _failure("none", "binary_unavailable")
+        # An external-evidence run must NOT skip review-reference resolution.
+        # Bypassing it would let an attachment or news question that happens
+        # to contain an MR/PR number silently audit the current checkout and
+        # report "none" provenance. Unresolvable references fail honestly
+        # exactly as an ordinary run does, and a resolved reference is audited
+        # against controller-fetched base/head snapshots with MR provenance.
+        repo_paths = target.repo_paths
+        try:
+            review_target = await asyncio.to_thread(
+                resolve_review_target, question, repo_paths
+            )
+        except ReviewRefError as exc:
+            logger.warning(
+                "[external] review refused class=%s", exc.failure_class
+            )
+            return _review_failure(exc.failure_class)
+        if review_target is not None:
+            return await self._run_review_locked(
+                review_target, author, question, excerpt,
+                bot_name=bot_name, bot_id=bot_id, prepared=prepared,
+            )
+        root = Path(target.primary_repo).expanduser().resolve()
+        additional_roots = [
+            Path(p).expanduser().resolve()
+            for p in repo_paths
+            if str(Path(p).expanduser().resolve()) != str(root)
+        ]
+
+        evidence_block = render_evidence_block(inputs)
+        attachment_files = self._vision_attachments(prepared)
+        prompt = (
+            f"From: {author}\n\n"
+            f"THREAD CONTEXT:\n{excerpt or '(start of conversation)'}\n\n"
+            f"CONTROLLER-PROVIDED EXTERNAL EVIDENCE (UNTRUSTED DATA):\n{evidence_block}\n\n"
+            f"LATEST QUESTION:\n{question}"
+        )
+        prompt_bytes = prompt.encode("utf-8")
+        if len(prompt_bytes) > MAX_PROMPT_BYTES:
+            logger.warning(
+                "[external] prompt rejected class=prompt_too_large bytes=%d",
+                len(prompt_bytes),
+            )
+            return _failure("none", "prompt_too_large")
+
+        # An external run is always read-only, whatever write_mode says.
+        prompt_str = build_prompt(
+            self._cfg.personality,
+            primary_repo=str(root),
+            additional_repos=[],
+            environment_mode=self._cfg.resolved_environment_mode,
+            memory=None,
+            bot_name=bot_name,
+            bot_id=bot_id,
+            write_mode="read-only",
+            write_dirs=[],
+            external_inputs=True,
+        )
+
+        disposable = DisposableNativeRoot()
+        try:
+            target_db = await initialize_native_schema(binary, disposable)
+            copied = copy_isolated_credentials(
+                native_db_path(resolve_opencode_paths().data_home), target_db
+            )
+            if copied == 0:
+                return _failure("none", "no_isolated_credentials")
+            (
+                events, stderr_bytes, stderr_sample, returncode,
+                error_class, duration_ms, completion,
+            ) = await self._execute_agent(
+                binary=binary,
+                root=root,
+                additional_roots=additional_roots,
+                prompt_str=prompt_str,
+                prompt=prompt,
+                session_id=None,
+                write_mode="read-only",
+                write_dirs=[],
+                files=attachment_files,
+                disposable=disposable,
+            )
+            text, _session, event_error, text_parts = _select_final_text_v2(
+                events, completion
+            )
+            error_class = error_class or event_error
+            if error_class is None:
+                text, marker_error = _extract_marked_answer(text)
+                error_class = marker_error
+            if error_class is None and not text:
+                error_class = "empty_response"
+            logger.info(
+                "[external] events=%d text_parts=%d stderr_bytes=%d duration_ms=%d "
+                "exit=%s images=%d evidence=%d error=%s",
+                len(events), text_parts, stderr_bytes, duration_ms,
+                returncode if returncode is not None else "none",
+                len(attachment_files), len(inputs.evidence),
+                error_class or "none",
+            )
+            if error_class:
+                return _failure("none", error_class)
+            return Reply(
+                text=_bounded_text(text, self._cfg.max_reply_chars),
+                sha="none",
+                ok=True,
+                session_id=None,
+            )
+        finally:
+            # Guaranteed cleanup on success, failure, timeout, and cancellation:
+            # no native session, no prompt text, and no attachment bytes survive.
+            disposable.close()
 
 
     async def _run_locked(
@@ -922,7 +1171,10 @@ class OpenCodeRunner:
         )
 
         run_started = time.time()
-        events, stderr_bytes, stderr_sample, returncode, error_class, duration_ms = (
+        (
+            events, stderr_bytes, stderr_sample, returncode,
+            error_class, duration_ms, completion,
+        ) = (
             await self._execute_agent(
                 binary=binary,
                 root=root,
@@ -934,7 +1186,9 @@ class OpenCodeRunner:
                 write_dirs=write_dirs,
             )
         )
-        text, returned_session, event_error, text_parts = _select_final_text(events)
+        text, returned_session, event_error, text_parts = _select_final_text_v2(
+            events, completion
+        )
         error_class = error_class or event_error
         if error_class is None:
             text, marker_error = _extract_marked_answer(text)
@@ -993,50 +1247,66 @@ class OpenCodeRunner:
         session_id: str | None,
         write_mode: str = "read-only",
         write_dirs: list[str] | tuple[str, ...] | None = None,
-    ) -> tuple[list[dict[str, Any]], int, str, int | None, str | None, int]:
-        """Spawn one bounded OpenCode audit subprocess and collect telemetry.
+        files: list[Path] | None = None,
+        disposable: DisposableNativeRoot | None = None,
+    ) -> tuple[
+        list[dict[str, Any]], int, str, int | None, str | None, int, NativeCompletion
+    ]:
+        """Spawn one bounded native v2 audit subprocess and collect telemetry.
 
-        The agent config grants only the fail-closed read policy for ``root``
-        plus explicitly authorized ``additional_roots``; all other tools
-        remain denied unless ``write_mode="docs-only"`` grants .md/.txt
-        edit/write (policy.py is the single source of that map). Reviews
-        always run read-only.
+        The repository Location is the subprocess working directory: native v2
+        removed ``--dir``. ``--standalone`` runs a private server so the run
+        never attaches to the shared background service. The agent config
+        grants only the fail-closed v2 permission rules for ``root`` plus
+        explicitly authorized ``additional_roots``; every other action stays
+        denied unless ``write_mode="docs-only"`` grants .md/.txt ``edit``
+        (policy.py is the single source of that rule list). Reviews always run
+        read-only.
 
         Args:
             binary: Resolved OpenCode executable path.
-            root: Primary workspace passed as ``--dir``.
+            root: Primary repository, used as the native working directory.
             additional_roots: Auxiliary roots authorized read-only.
             prompt_str: Embedded system prompt.
             prompt: Bounded user prompt written to stdin.
             session_id: Optional OpenCode session to resume.
             write_mode: ``"read-only"`` or ``"docs-only"``.
             write_dirs: Optional repo-relative scopes for doc writes.
+            files: Optional image paths attached as real native attachments.
+            disposable: Private native root for external-evidence runs. When
+                supplied, the run never touches the ordinary conversation
+                storage and the caller deletes the root afterwards.
 
         Returns:
             ``(events, stderr_bytes, stderr_sample, returncode, error_class,
             duration_ms)``. ``error_class`` covers spawn, timeout, protocol,
             and exit failures; final-text selection stays with the caller.
         """
-        paths = resolve_opencode_paths()
-        paths.ensure()
-        config_content = json.dumps(
-            build_agent_config(
-                self._cfg.opencode_model,
-                self._cfg.opencode_steps,
-                root,
-                prompt_str,
-                additional_repo_roots=additional_roots,
-                write_mode=write_mode,
-                write_dirs=write_dirs,
-            ),
-            separators=(",", ":"),
+        agent_document = build_agent_config(
+            self._cfg.opencode_model,
+            self._cfg.opencode_steps,
+            root,
+            prompt_str,
+            additional_repo_roots=additional_roots,
+            write_mode=write_mode,
+            write_dirs=write_dirs,
         )
-        argv = [binary, "run", "--format", "json", "--model",
-                self._cfg.opencode_model, "--agent", "oi", "--dir", str(root.resolve())]
-        if session_id:
-            argv.extend(["--session", session_id])
-        environment = paths.environment()
-        environment["OPENCODE_CONFIG_CONTENT"] = config_content
+        argv = [
+            binary,
+            *build_argv(
+                self._cfg.opencode_model, "oi",
+                session_id=session_id, files=files,
+            ),
+        ]
+        if disposable is not None:
+            environment = disposable.environment()
+            db_path = native_db_path(disposable.data_home)
+        else:
+            paths = resolve_opencode_paths()
+            paths.ensure()
+            environment = paths.environment()
+            db_path = native_db_path(paths.data_home)
+        environment["OPENCODE_CONFIG_CONTENT"] = config_content(agent_document)
         started = time.monotonic()
         process: asyncio.subprocess.Process | None = None
         stdout_task: asyncio.Task | None = None
@@ -1052,6 +1322,7 @@ class OpenCodeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=environment,
+                cwd=str(root.resolve()),
                 start_new_session=(os.name == "posix"),
             )
             assert process.stdin is not None
@@ -1100,11 +1371,26 @@ class OpenCodeRunner:
                 error_class = "unknown_session"
             else:
                 error_class = error_class or "nonzero_exit"
+        completion = NativeCompletion(False, "empty_response")
         if not events:
             error_class = error_class or "empty_response"
+        else:
+            seen_session, message_id, had_error = _stream_identity(events)
+            completion = verify_completion(
+                db_path,
+                seen_session,
+                message_id,
+                returncode=process.returncode if process is not None else None,
+                has_error_event=had_error,
+            )
+            if not completion.completed:
+                error_class = error_class or completion.error_class
         duration_ms = int((time.monotonic() - started) * 1000)
         returncode = process.returncode if process is not None else None
-        return events, stderr_bytes, stderr_sample, returncode, error_class, duration_ms
+        return (
+            events, stderr_bytes, stderr_sample, returncode,
+            error_class, duration_ms, completion,
+        )
 
     async def _run_review_locked(
         self,
@@ -1186,7 +1472,10 @@ class OpenCodeRunner:
                 bot_name=bot_name,
                 bot_id=bot_id,
             )
-            events, stderr_bytes, stderr_sample, returncode, error_class, duration_ms = (
+            (
+                events, stderr_bytes, stderr_sample, returncode,
+                error_class, duration_ms, completion,
+            ) = (
                 await self._execute_agent(
                     binary=binary,
                     root=snapshot.head_dir,
@@ -1196,7 +1485,7 @@ class OpenCodeRunner:
                     session_id=None,
                 )
             )
-            text, _, event_error, text_parts = _select_final_text(events)
+            text, _, event_error, text_parts = _select_final_text_v2(events, completion)
             error_class = error_class or event_error
             if error_class is None:
                 text, marker_error = _extract_marked_answer(text)

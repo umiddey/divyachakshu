@@ -45,6 +45,7 @@ from .records import (
     EvidenceItem,
     PreparedInputs,
     bounded_text,
+    image_media_type_for,
 )
 from .retrieval import RetrievalError, fetch_public_document, search_news, search_web
 
@@ -98,16 +99,21 @@ async def prepare_external_inputs(
     *,
     retrieval_enabled: bool = True,
     evidence_items: int = MAX_EVIDENCE_ITEMS,
+    max_attachments: int = MAX_ATTACHMENTS,
 ) -> PreparedExternal:
     """Prepare bounded external evidence and attachments for one run.
 
     Args:
         message: The current direct user message.
         attachments: Attachment candidates already authorized by the platform
-            adapter, in admission order.
+            adapter, in admission order. EVERY candidate receives an honest
+            record; none is silently dropped for being over a cap.
         retrieval_enabled: When False, no outbound request is made at all and
             the run reports an honest capability limitation instead.
         evidence_items: Maximum number of news/URL evidence items.
+        max_attachments: Operator attachment-count limit (``oi config set
+            max_attachments``). Candidates past the limit are reported as
+            limit-reached, never pre-sliced away.
 
     Returns:
         A :class:`PreparedExternal`. Call :meth:`PreparedExternal.close` when
@@ -128,7 +134,7 @@ async def prepare_external_inputs(
         elif isinstance(outcome, PublicRefusal):
             prepared.refusal = outcome.reason
     if attachments:
-        await _collect_attachments(prepared, attachments)
+        await _collect_attachments(prepared, attachments, max_attachments)
     return prepared
 
 
@@ -233,8 +239,15 @@ def _host_of(url: str) -> str:
 async def _collect_attachments(
     prepared: PreparedExternal,
     candidates: list[AttachmentCandidate],
+    max_attachments: int = MAX_ATTACHMENTS,
 ) -> None:
-    """Fetch, classify, and bound admitted attachments within aggregate caps."""
+    """Fetch, classify, and bound admitted attachments within aggregate caps.
+
+    Every candidate gets an honest record, and every cap is enforced against
+    the bytes that were ACTUALLY downloaded, not just the sizes the platform
+    declared: a lying declared size cannot smuggle an oversized payload into
+    the run, and overflow past any limit is reported, never pre-sliced away.
+    """
     seen: set[str] = set()
     total_bytes = 0
     accepted = 0
@@ -244,7 +257,7 @@ async def _collect_attachments(
         if candidate.attachment_id in seen:
             continue
         seen.add(candidate.attachment_id)
-        if accepted >= MAX_ATTACHMENTS:
+        if accepted >= max_attachments:
             prepared.inputs.attachments.append(AttachmentInput(
                 attachment_id=candidate.attachment_id,
                 source_message_id=candidate.source_message_id,
@@ -253,12 +266,10 @@ async def _collect_attachments(
                 declared_size=candidate.declared_size,
                 kind="unknown",
                 status=STATUS_LIMIT,
-                limitations=(f"exceeded the {MAX_ATTACHMENTS}-attachment limit",),
+                limitations=(f"exceeded the {max_attachments}-attachment limit",),
             ))
             continue
-        over_item_cap = candidate.declared_size > MAX_ATTACHMENT_BYTES
-        over_total_cap = total_bytes + candidate.declared_size > MAX_TOTAL_ATTACHMENT_BYTES
-        if over_item_cap or over_total_cap:
+        if candidate.declared_size > MAX_ATTACHMENT_BYTES:
             prepared.inputs.attachments.append(AttachmentInput(
                 attachment_id=candidate.attachment_id,
                 source_message_id=candidate.source_message_id,
@@ -267,7 +278,7 @@ async def _collect_attachments(
                 declared_size=candidate.declared_size,
                 kind="unknown",
                 status=STATUS_TOO_LARGE,
-                limitations=("exceeds the per-run attachment byte limit",),
+                limitations=("declared size exceeds the per-attachment limit",),
             ))
             continue
         try:
@@ -298,6 +309,30 @@ async def _collect_attachments(
             ))
             continue
         data = bytes(payload)
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            prepared.inputs.attachments.append(AttachmentInput(
+                attachment_id=candidate.attachment_id,
+                source_message_id=candidate.source_message_id,
+                filename=candidate.filename,
+                declared_media_type=candidate.declared_media_type,
+                declared_size=len(data),
+                kind="unknown",
+                status=STATUS_TOO_LARGE,
+                limitations=("downloaded size exceeds the per-attachment limit",),
+            ))
+            continue
+        if total_bytes + len(data) > MAX_TOTAL_ATTACHMENT_BYTES:
+            prepared.inputs.attachments.append(AttachmentInput(
+                attachment_id=candidate.attachment_id,
+                source_message_id=candidate.source_message_id,
+                filename=candidate.filename,
+                declared_media_type=candidate.declared_media_type,
+                declared_size=len(data),
+                kind="unknown",
+                status=STATUS_TOO_LARGE,
+                limitations=("would exceed the per-run aggregate attachment limit",),
+            ))
+            continue
         total_bytes += len(data)
         accepted += 1
         await _classify_attachment(prepared, candidate, data, image_inputs)
@@ -337,6 +372,24 @@ async def _classify_attachment(
     info = await inspect_image(data)
     if info is not None:
         image_inputs.append((label, data, info))
+        return
+    if image_media_type_for("", data[:32]) is not None:
+        # The bytes claim a supported image type but failed validation (past
+        # the pixel/frame budget or malformed). Record that explicitly rather
+        # than letting it fall through to text sniffing.
+        prepared.inputs.attachments.append(AttachmentInput(
+            attachment_id=candidate.attachment_id,
+            source_message_id=candidate.source_message_id,
+            filename=candidate.filename,
+            declared_media_type=candidate.declared_media_type,
+            declared_size=len(data),
+            kind="image",
+            status=STATUS_UNSUPPORTED,
+            limitations=(
+                "the image was not usable: it is malformed or past the "
+                "pixel/frame budget",
+            ),
+        ))
         return
 
     kind = sniff_kind(candidate.filename, data)
