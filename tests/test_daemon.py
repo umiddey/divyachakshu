@@ -116,7 +116,7 @@ def test_doctor_validates_user_and_permissions(tmp_path, monkeypatch):
     version_mock = SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25")
     monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
     monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
-    monkeypatch.setattr("oi_agent.daemon.list_models", lambda *args: ["provider/model"])
+    monkeypatch.setattr("oi_agent.daemon.model_available", lambda *args: True)
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
 
     monkeypatch.setattr("oi_agent.daemon._identity", lambda user, *args: DaemonIdentity(user, tmp_path, 0, 0))
@@ -151,7 +151,7 @@ def test_doctor_detects_stale_leases_and_dead_jobs(tmp_path, monkeypatch):
     version_mock = SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25")
     monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
     monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
-    monkeypatch.setattr("oi_agent.daemon.list_models", lambda *args: ["provider/model"])
+    monkeypatch.setattr("oi_agent.daemon.model_available", lambda *args: True)
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
 
     # Clean store: no failures
@@ -180,3 +180,69 @@ def test_install_user_mode_renders_user_service(tmp_path):
     assert "User=" not in unit
     assert "Group=" not in unit
     assert "ExecStart=" in unit
+
+
+def _doctor_v2_config(tmp_path):
+    """Build a doctor config whose repo and state roots exist."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    cfg = Config(
+        opencode_binary="/bin/true",
+        opencode_model="zai-coding-plan/glm-5.3-flash",
+        db_path=str(state / "state.db"),
+    )
+    cfg.watches = [WatchTarget(1, str(repo))]
+    return cfg
+
+
+def _patch_doctor_opencode(monkeypatch, tmp_path):
+    """Pin doctor to an isolated root with proven v2.0.5 probe shapes.
+
+    `auth list --standalone` prints "No authenticated integrations" and
+    `models --standalone` exits 0 with empty output on a working install.
+    """
+    from types import SimpleNamespace
+
+    from test_opencode_bootstrap import _seed_credential_db
+
+    from oi_agent.opencode import bootstrap
+    from oi_agent.opencode.paths import resolve_opencode_paths
+
+    version_mock = SimpleNamespace(binary="/bin/true", version=(2, 0, 5), raw="2.0.5")
+    monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
+    monkeypatch.setattr(
+        "oi_agent.daemon.resolve_opencode_paths",
+        lambda *args, **kwargs: resolve_opencode_paths(tmp_path),
+    )
+
+    def fake_run(cmd, **kwargs):
+        if "auth" in cmd:
+            return SimpleNamespace(returncode=0, stdout="No authenticated integrations\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    return _seed_credential_db, resolve_opencode_paths(tmp_path)
+
+
+def test_doctor_v2_output_shapes_do_not_false_fail(tmp_path, monkeypatch):
+    """A credentialed install passes doctor despite v2's empty probe output."""
+    cfg = _doctor_v2_config(tmp_path)
+    seed, paths = _patch_doctor_opencode(monkeypatch, tmp_path)
+    seed(paths.data_home, "zai-coding-plan")
+    monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
+
+    failures = doctor(cfg)
+    assert failures == []
+
+
+def test_doctor_reports_missing_credential_and_model_without_store(tmp_path, monkeypatch):
+    """Without any credential row both the auth and model checks must fire."""
+    cfg = _doctor_v2_config(tmp_path)
+    _patch_doctor_opencode(monkeypatch, tmp_path)
+    monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
+
+    failures = doctor(cfg)
+    assert any("no OpenCode provider is authenticated" in f for f in failures)
+    assert any("selected model unavailable" in f for f in failures)

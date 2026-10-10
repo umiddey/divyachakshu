@@ -52,6 +52,7 @@ from .opencode.bootstrap import (
     check_version,
     install_opencode,
     list_models,
+    model_available,
 )
 from .opencode.paths import resolve_opencode_paths
 from .store import Store
@@ -119,13 +120,13 @@ def _ensure_opencode(requested_model: str | None, consent: bool) -> str:
         install_opencode(paths)
         version = check_version("opencode", paths)
 
-    if not authenticated(version.binary, paths):
+    if not authenticated(paths):
         console.print("[yellow]Authenticating OpenCode provider...[/yellow]")
         authenticate(version.binary, paths)
 
     models = list_models(version.binary, paths)
     if requested_model:
-        if requested_model not in models:
+        if not model_available(version.binary, paths, requested_model):
             console.print(f"[yellow]warning: model {requested_model} not in detected models[/yellow]")
         return requested_model
 

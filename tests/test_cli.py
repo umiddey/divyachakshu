@@ -245,7 +245,7 @@ def test_doctor_command_detects_store_queue_failures(tmp_path, monkeypatch):
     version_mock = SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25")
     monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
     monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
-    monkeypatch.setattr("oi_agent.daemon.list_models", lambda *args: ["openai/gpt-4o-mini"])
+    monkeypatch.setattr("oi_agent.daemon.model_available", lambda *args: True)
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
     # Healthy store
     store = Store(store_path)

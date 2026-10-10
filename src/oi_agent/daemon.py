@@ -14,7 +14,7 @@ from .opencode.bootstrap import (
     OpenCodeBootstrapError,
     authenticated,
     check_version,
-    list_models,
+    model_available,
 )
 from .opencode.paths import resolve_opencode_paths
 from .store import Store
@@ -418,9 +418,9 @@ def doctor(cfg: Config, *, user: str | None = None) -> list[str]:
     paths = resolve_opencode_paths(identity.home if identity else None)
     try:
         version = check_version(cfg.opencode_binary, paths)
-        if not authenticated(version.binary, paths):
+        if not authenticated(paths):
             failures.append("no OpenCode provider is authenticated")
-        if cfg.opencode_model not in list_models(version.binary, paths):
+        if not model_available(version.binary, paths, cfg.opencode_model):
             failures.append(f"selected model unavailable: {cfg.opencode_model}")
     except OpenCodeBootstrapError as exc:
         failures.append(str(exc))

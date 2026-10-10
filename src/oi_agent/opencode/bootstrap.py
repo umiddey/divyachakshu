@@ -6,10 +6,12 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .native import NATIVE_DB_RELATIVE
 from .paths import OpenCodePaths
 
 # The implemented contract is native v2 only. v1 used `agent.<id>.permission`
@@ -19,6 +21,12 @@ from .paths import OpenCodePaths
 # carried with a compatibility shim that would not be enforced.
 MIN_OPENCODE_VERSION = (2, 0, 0)
 INSTALL_DOCS_URL = "https://opencode.ai/docs/#install"
+# Doctor/init probes must answer quickly. A v2 CLI that cannot (for example
+# one looping because the user's own `opencode serve --service` already holds
+# the managed port 49374) must surface as a reported failure, not a 600 s hang.
+PROBE_TIMEOUT_SECONDS = 15.0
+# Interactive login hands the terminal to the operator; it is not a probe.
+LOGIN_TIMEOUT_SECONDS = 600.0
 _VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
 _MODEL_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_./:@+-]+)")
 
@@ -165,36 +173,69 @@ def install_opencode(paths: OpenCodePaths) -> str:
 
 
 def _run(binary: str, args: list[str], paths: OpenCodePaths,
-         *, inherit_stdio: bool = False) -> subprocess.CompletedProcess[str]:
-    """Run one allowlisted OpenCode bootstrap command."""
+         *, inherit_stdio: bool = False,
+         timeout: float = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    """Run one allowlisted OpenCode bootstrap command.
+
+    Every subcommand runs ``--standalone``: without it a v2 CLI connects to
+    (or starts) the managed background service on 127.0.0.1:49374, and when
+    the user's own `opencode serve --service` already holds that port the CLI
+    loops forever in OI's isolated environment. The default bounded timeout
+    turns any remaining wedge into a reported failure instead of a hang;
+    interactive commands pass their own timeout.
+    """
     resolved = resolve_binary(binary)
     kwargs = {
         "env": paths.environment(),
         "check": False,
-        "timeout": 600,
+        "timeout": timeout,
     }
     if not inherit_stdio:
         kwargs.update(capture_output=True, text=True)
-    return subprocess.run([resolved, *args], **kwargs)
+    return subprocess.run([resolved, *args, "--standalone"], **kwargs)
 
 
-def authenticated(binary: str, paths: OpenCodePaths) -> bool:
-    """Return whether OpenCode reports at least one configured provider."""
+def credential_integrations(paths: OpenCodePaths) -> frozenset[str]:
+    """Return integration IDs holding a stored credential, read-only.
+
+    Reuses the read pattern of native.copy_isolated_credentials: the isolated
+    native database is opened read-only and only the ``integration_id``
+    column is selected, so no credential value ever enters OI memory.
+    """
+    database = paths.data_home / NATIVE_DB_RELATIVE
+    if not database.is_file():
+        return frozenset()
     try:
-        completed = _run(binary, ["auth", "list"], paths)
-    except (OpenCodeBootstrapError, OSError, subprocess.SubprocessError):
-        return False
-    if completed.returncode != 0:
-        return False
-    output = "\n".join((completed.stdout or "").splitlines()).strip()
-    return bool(output and "no credentials" not in output.lower()
-                and "not authenticated" not in output.lower())
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return frozenset()
+    try:
+        rows = connection.execute("SELECT integration_id FROM credential").fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    finally:
+        connection.close()
+    return frozenset(str(row[0]) for row in rows if row and row[0])
+
+
+def authenticated(paths: OpenCodePaths) -> bool:
+    """Return whether the isolated native store holds a provider credential.
+
+    v2 ``auth list`` reports INTEGRATIONS, not provider credentials: on a
+    working install it prints "No authenticated integrations" while runs
+    authenticate fine from the credential table, so parsing that output
+    returned True by accident. The honest probe is the credential store
+    itself (see credential_integrations). A probe that cannot run, times out,
+    or finds no store is reported as not authenticated.
+    """
+    return bool(credential_integrations(paths))
 
 
 def authenticate(binary: str, paths: OpenCodePaths) -> None:
     """Hand an interactive terminal to OpenCode authentication."""
-    completed = _run(binary, ["auth", "login"], paths, inherit_stdio=True)
-    if completed.returncode != 0 or not authenticated(binary, paths):
+    completed = _run(binary, ["auth", "login"], paths,
+                     inherit_stdio=True, timeout=LOGIN_TIMEOUT_SECONDS)
+    if completed.returncode != 0 or not authenticated(paths):
         raise OpenCodeBootstrapError(
             "OpenCode authentication was not completed; rerun `opencode auth login`"
         )
@@ -204,12 +245,35 @@ def list_models(binary: str, paths: OpenCodePaths) -> list[str]:
     """Return exact provider/model IDs from OpenCode's model listing."""
     try:
         completed = _run(binary, ["models"], paths)
+    except subprocess.TimeoutExpired as exc:
+        raise OpenCodeBootstrapError(
+            f"OpenCode model listing did not finish within "
+            f"{PROBE_TIMEOUT_SECONDS:g}s; another OpenCode process may be "
+            "holding the managed service port"
+        ) from exc
     except (OpenCodeBootstrapError, OSError, subprocess.SubprocessError) as exc:
         raise OpenCodeBootstrapError("OpenCode model listing failed") from exc
     if completed.returncode != 0:
         raise OpenCodeBootstrapError("OpenCode model listing failed")
     models = sorted(set(_MODEL_RE.findall(completed.stdout or "")))
     return models
+
+
+def model_available(binary: str, paths: OpenCodePaths, model: str) -> bool:
+    """Return whether `model` can run in the isolated native environment.
+
+    A non-empty `models` listing is the authoritative availability set. An
+    empty listing is a proven v2.0.5 shape (`models --standalone` exits 0
+    with no output while runs against credentialed providers succeed), so it
+    must not false-fail: the probe then falls back to the credential store
+    and requires an integration credential for the model's provider prefix —
+    exactly what a run itself authenticates with.
+    """
+    models = list_models(binary, paths)
+    if models:
+        return model in models
+    provider = model.split("/", 1)[0]
+    return provider in credential_integrations(paths)
 
 
 def bootstrap(binary: str, paths: OpenCodePaths, *, install: bool = False,
@@ -233,6 +297,6 @@ def bootstrap(binary: str, paths: OpenCodePaths, *, install: bool = False,
             raise
         installed = install_opencode(paths)
         version = check_version(installed, paths)
-    if login and not authenticated(version.binary, paths):
+    if login and not authenticated(paths):
         authenticate(version.binary, paths)
     return version
