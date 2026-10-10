@@ -23,7 +23,13 @@ from typing import Any
 import discord
 
 from .._tempowner import sweep_abandoned_temp_roots
+from ..agent.reply import Reply
 from ..config import Config, WatchTarget
+from ..external.intent import (
+    REFUSAL_AMBIGUOUS,
+    REFUSAL_DISABLED,
+    REFUSAL_PRIVATE,
+)
 from ..external.prepare import (
     AttachmentCandidate,
     PreparedExternal,
@@ -80,11 +86,55 @@ def _strip_fresh_command(content: str, bot_user_id: int) -> tuple[str, bool]:
     return (mention + content[match.end():]).rstrip(), True
 
 
+def _extraction_source(content: str, bot_user_id: int) -> str:
+    """Raw latest content with only this bot's leading mention removed.
+
+    Public-request extraction must see the raw command/topic text. The
+    mention-resolved form ("@Name (user id N) !news topic") would break the
+    anchored ``!command`` match, so extraction reads the raw text with just
+    the leading own-bot mention markup (and any already-consumed ``!fresh``
+    command) removed. Never a resolved member display name.
+    """
+    if not content or not bot_user_id:
+        return content
+    stripped = re.sub(rf"^\s*<@!?{bot_user_id}>\s*", "", content)
+    return stripped or content
+
+
+# Honest chat replies for an explicit public attempt that produced no usable
+# evidence. The category is the only machine detail that reaches the reply.
+_LIMITATION_REPLIES = {
+    REFUSAL_DISABLED: (
+        "Public internet retrieval is disabled on this bot, so I can't fetch "
+        "news or web pages. This request was not answered from repository "
+        "knowledge."
+    ),
+    REFUSAL_AMBIGUOUS: (
+        "That looks like a public lookup, but it doesn't name a public topic "
+        "or URL. Reply with a public news topic, web subject, or URL and I'll "
+        "look it up."
+    ),
+    REFUSAL_PRIVATE: (
+        "I can't look that up: it refers to private conversation content, and "
+        "I only fetch public sources. Name a public topic or URL instead."
+    ),
+}
+
+
+def _limitation_reply(category: str) -> str:
+    """Return the honest limitation reply for one limitation category."""
+    return _LIMITATION_REPLIES.get(
+        category,
+        f"Public retrieval is unavailable right now (retrieval unavailable: "
+        f"{category}). This request was not answered from repository knowledge.",
+    )
+
+
 def _resolve_user_mentions(content: str, mentions: list[Any] | None) -> str:
     """Replace raw Discord user-mention markup with grounded names.
 
-    Discord delivers ``<@id>`` markup rather than names, which forces the model
-    to guess who a mention refers to. Each resolvable mention becomes
+    Discord delivers ``<@id>`` markup rather than names, which forces the
+    model to guess who a mention refers to. Each resolvable mention becomes
     ``@DisplayName (user id N)``; unknown ids degrade to an explicit unknown
     marker so the model never has to infer.
 
@@ -757,6 +807,7 @@ class OIWatcher(discord.Client):
         burst_messages: list[Any],
         context_messages: list[Any],
         reply_messages: list[Any],
+        extraction_source: str | None = None,
     ) -> PreparedExternal:
         """Prepare bounded external evidence for one request, or none.
 
@@ -767,6 +818,10 @@ class OIWatcher(discord.Client):
         sources and same-scope replies are always honored. The operator
         attachment cap is passed through so overflow past it is reported as
         an honest limit-reached record, never pre-sliced away.
+
+        The public-request extraction reads ``extraction_source`` — the raw
+        latest content with only the leading own-bot mention/session command
+        removed — not the mention-resolved ``question``.
         """
         enabled = self._cfg.external_inputs == "read-only"
         candidates: list[AttachmentCandidate] = []
@@ -782,7 +837,7 @@ class OIWatcher(discord.Client):
                 reply_messages=reply_messages,
             )
         prepared = await prepare_external_inputs(
-            question,
+            extraction_source if extraction_source is not None else question,
             candidates,
             retrieval_enabled=enabled,
             evidence_items=self._cfg.max_external_evidence_items,
@@ -1421,9 +1476,21 @@ class OIWatcher(discord.Client):
                         burst_messages=burst_messages,
                         context_messages=context.messages,
                         reply_messages=reply_messages,
+                        extraction_source=_extraction_source(
+                            prompt_content, command_bot_id
+                        ),
                     )
                     try:
-                        if prepared.is_external_run:
+                        if (
+                            prepared.limitation_category is not None
+                            and not prepared.inputs.has_external_content
+                        ):
+                            # An explicit public attempt with no usable evidence
+                            # is answered with an honest limitation. It never
+                            # resumes a conversation session, never writes, and
+                            # never falls back silently to repository knowledge.
+                            reply = Reply(_limitation_reply(prepared.limitation_category), "none")
+                        elif prepared.is_external_run:
                             # An external-evidence run never resumes or returns a
                             # conversation session, so nothing is written under
                             # the conversation key and the run cannot inherit

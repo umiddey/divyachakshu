@@ -24,7 +24,9 @@ from urllib.parse import urlsplit
 from .documents import extract_document, sniff_kind
 from .images import ImageInfo, ImagePreparation, inspect_image, prepare_images
 from .intent import (
+    REFUSAL_AMBIGUOUS,
     REFUSAL_DISABLED,
+    REFUSAL_PRIVATE,
     PublicRefusal,
     PublicRequest,
     extract_public_request,
@@ -74,6 +76,28 @@ class AttachmentCandidate:
     fetch: object  # zero-arg async callable returning the real bytes
 
 
+# Controller-note wording, per limitation category, for a public attempt that
+# produced no evidence. When attachments are still served by an external run,
+# this note is what reaches the prompt so the model reports the real
+# capability gap instead of answering the public part from memory.
+_LIMITATION_NOTES = {
+    REFUSAL_DISABLED: (
+        "public retrieval is disabled; this request was not answered from the internet"
+    ),
+    REFUSAL_AMBIGUOUS: (
+        "ambiguous public request; no public topic or URL was named"
+    ),
+    REFUSAL_PRIVATE: (
+        "private referential request; the public lookup was refused"
+    ),
+}
+
+
+def limitation_note(category: str) -> str:
+    """Return the bounded controller note for one limitation category."""
+    return _LIMITATION_NOTES.get(category, f"retrieval unavailable: {category}")
+
+
 @dataclass
 class PreparedExternal:
     """Everything the native runner needs for one external-input run."""
@@ -82,11 +106,28 @@ class PreparedExternal:
     request: PublicRequest | None = None
     refusal: str | None = None
     image_preparation: ImagePreparation | None = None
+    retrieval_category: str | None = None
 
     @property
     def is_external_run(self) -> bool:
         """Return True when the run needs fresh, disposable, read-only state."""
         return self.inputs.has_external_content
+
+    @property
+    def limitation_category(self) -> str | None:
+        """Bounded category when the public attempt produced no evidence.
+
+        Non-``None`` exactly when the message explicitly attempted the public
+        internet but this preparation carries no usable evidence: the gate is
+        disabled, the ask is ambiguous or private-referential, or retrieval
+        failed. Such a run must be answered with an honest limitation and must
+        never fall back silently to a repository audit.
+        """
+        if self.refusal is not None:
+            return self.refusal
+        if self.request is not None and not self.inputs.evidence:
+            return self.retrieval_category or "retrieval_unavailable"
+        return None
 
     def close(self) -> None:
         """Delete every transient byte this preparation created."""
@@ -135,6 +176,11 @@ async def prepare_external_inputs(
             prepared.refusal = outcome.reason
     if attachments:
         await _collect_attachments(prepared, attachments, max_attachments)
+    category = prepared.limitation_category
+    if category is not None and prepared.inputs.has_external_content:
+        # The external run proceeds for the attachments, but the failed public
+        # attempt must reach the prompt as an explicit controller note.
+        prepared.inputs.notes.append(limitation_note(category))
     return prepared
 
 
@@ -163,6 +209,7 @@ async def _collect_evidence(
         logger.info(
             "[external] retrieval refused category=%s kind=%s", exc.category, request.kind
         )
+        prepared.retrieval_category = exc.category
         prepared.inputs.notes.append(f"retrieval unavailable: {exc.category}")
 
 
