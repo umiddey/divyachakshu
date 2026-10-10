@@ -22,16 +22,26 @@ tool loop, repository manifest, or skill integration.
 
 ## Safety model
 
-- Only the final completed OpenCode assistant message is deliverable.
+- Only the final completed OpenCode assistant message is deliverable. Native
+  v2 emits no terminal step event for the final answer, so completion is
+  proven from OpenCode's own database state (the exact assistant message
+  recorded with `finish=stop` and a later successful idle outcome for the
+  same session); anything unproven fails closed with a bounded error class.
   Intermediate narration, reasoning, and partial assistant steps never reach
   the outbox or Discord, and reply truncation preserves the provenance footer.
 - Git remotes remain read-scoped. OI may run
   `git pull --ff-only --autostash` to refresh a watched clone; OpenCode cannot
   edit source files or execute shell commands.
-- Each run supplies an inline native `agent.oi` configuration with explicit
-  read-only repository permissions. `read`, `glob`, `grep`, `list`, and `lsp`
-  are allowed only inside the watched root. `edit`, `bash`, web access, MCP,
-  skills, tasks, questions, and external directories are denied.
+- Each run supplies an inline native v2 `agents.oi` configuration. A broad
+  deny-all comes first (it overrides OpenCode v2's allow-by-default base policy
+  and also constrains hidden maintenance agents), then only narrow re-grants:
+  repository-scoped `read` and `glob` inside the watched root. `shell`,
+  `subagent`, `skill`, `question`, `webfetch`, `websearch`, `execute`, `edit`,
+  and every `external_directory` are denied. OpenCode v1 and unknown future
+  major versions are rejected outright: their permission schemas differ and OI
+  never runs under ignored policy.
+- Automatic snapshot and formatter side paths are switched off (`snapshot`,
+  `formatter`), so a read-only audit never mutates the repository.
 - `.git`, `.env*`, private keys, certificates, credentials, and known secret
   files are denied even inside the repository.
 - Watched-repository `opencode.json` and `.opencode/` configuration are disabled
@@ -68,6 +78,80 @@ treated as ordinary text: only the explicit forms above trigger a review.
   never resume or store conversation sessions.
 - Temporary snapshots and object repositories are removed after every run —
   success, failure, timeout, or cancellation — and are never persisted.
+
+## External inputs: web, news, files, and images
+
+OI can answer questions that explicitly ask for public internet information or
+attach files. The feature is **off by default** and controller-owned: OI —
+never the model — performs every retrieval, download, and parse, then hands
+the model a bounded, clearly-delimited untrusted-evidence block. The model
+never receives web, shell, or network tools, and text or images inside
+external content can never authorize a tool call, a permission, a wider
+scope, a file write, or a new request.
+
+### Capability switches
+
+```bash
+oi config set external_inputs read-only   # disabled | read-only (disabled is the default)
+oi config set image_inputs on             # off | on (off is the default)
+oi config set max_external_evidence_items 8    # 1..50
+oi config set max_attachments 4                # 0..16
+oi config set max_attachment_bytes 8388608     # up to 32 MiB per attachment
+```
+
+`external_inputs = "disabled"` is the conservative shipped default: explicit
+public requests then get an honest capability limitation, zero retrieval
+requests are made, and ordinary repository behavior is unchanged.
+`image_inputs = "on"` states that the configured native model can actually see
+images — the capability cannot be proven automatically, so an operator must
+assert it. With `"off"`, images are described as metadata only: the model is
+told visual understanding is unavailable and must never guess at image
+contents, while independent text and document parts still get answered.
+
+### What works
+
+- **News**: `@OI get the latest news about Python` queries the Google News RSS
+  search endpoint and returns fresh items with title, publisher, link, and
+  publication time, newest first. Items without a parseable publication time
+  are sorted last and labelled.
+- **Web search**: `@OI search the web for Python releases` uses the general
+  Bing RSS endpoint. Result links point at the actual publisher hosts, with
+  bounded descriptions; the search engine's own wrapper pages are never
+  presented as publisher articles.
+- **Public URLs**: a public URL explicitly supplied in the current request is
+  fetched read-only through a DNS-pinned connector that validates every
+  resolved address (loopback, private, link-local, metadata, and reserved
+  ranges refused; redirects re-validated), keeps TLS hostname verification,
+  and refuses proxies and cookies.
+- **Attachments**: plain UTF-8 text/Markdown/CSV/JSON, PDF, and DOCX files are
+  actually parsed into bounded evidence text; PNG/JPEG/WebP/GIF images are
+  passed as real image files when `image_inputs = "on"`. Scanned or empty PDFs
+  honestly report that no text was extractable. Lying MIME types and
+  extensions are detected from the real bytes; unsupported file types stay
+  attachable as metadata but are never fabricated.
+
+### What is refused
+
+- Private-referential asks ("search for the token above", "look up what is in
+  this file") fail with a request for a public topic or URL. Queries and URLs
+  originate only from the current direct request — never from history,
+  attachments, repository evidence, or a previous session.
+- Every download enforces the operator caps on actual bytes (declared sizes
+  are not trusted), aggregate limits, and an approved HTTPS CDN host list for
+  Discord attachments, with no redirects and no signed URLs in evidence or
+  logs.
+
+### Privacy
+
+- External runs are always read-only regardless of `write_mode`, never resume
+  or store conversation sessions, and run against **disposable native storage**
+  (private HOME/XDG/TMPDIR roots that are deleted afterwards, including any
+  bytes the harness persists).
+- Only minimal credential rows are copied from OI's already-isolated native
+  database into the disposable root — never personal auth, sessions, projects,
+  or evidence tables. Attachment and evidence bodies live in memory or
+  job-private temp files for one run only and are never written to OI's
+  database or logs.
 
 ## Quick start
 
@@ -107,6 +191,13 @@ opencode_timeout_seconds = 900
 environment_mode = "workstation"
 max_session_turns = 30
 session_ttl_days = 7
+
+# Controller-owned external inputs (all optional; conservative defaults):
+external_inputs = "disabled"        # "disabled" | "read-only"
+image_inputs = "off"                # "off" | "on"
+max_external_evidence_items = 8
+max_attachments = 4
+max_attachment_bytes = 8388608
 
 # 1. Channel-specific watch auditing multiple repositories:
 [[watch]]

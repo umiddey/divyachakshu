@@ -100,3 +100,54 @@ def test_prompt_without_identity_matches_legacy_behavior():
     assert 'You post on Discord as "OI".' in prompt_name_only
     prompt_id_only = build_prompt("voice", bot_id=42)
     assert "Your Discord user id is 42." in prompt_id_only
+
+
+def test_controller_snapshot_policy_grants_location_reads_only(tmp_path):
+    """Snapshot attestation grants Location-scoped reads plus the base prefix.
+
+    Materialized review snapshots carry no ``.git``, so without the
+    attestation M1's fail-closed Location rule would deny every read of the
+    audit subject. Proven on real native: relative reads stay confined to the
+    working snapshot, and only the explicitly granted base prefix is readable
+    outside it.
+    """
+    from oi_agent.opencode.policy import build_permission_policy
+
+    head = tmp_path / "head"
+    base = tmp_path / "base"
+    head.mkdir()
+    base.mkdir()
+
+    # Without the attestation, a .git-less snapshot root is read-denied.
+    unattested = build_permission_policy(head.resolve(), additional_repo_roots=[base.resolve()])
+    assert _effective(unattested, "read", "defect_check.py") == "deny"
+
+    attested = build_permission_policy(
+        head.resolve(),
+        additional_repo_roots=[base.resolve()],
+        controller_snapshots=True,
+    )
+    assert attested[0] == {"action": "*", "resource": "*", "effect": "deny"}
+    # Location-scoped reads (head snapshot) with secret denies.
+    assert _effective(attested, "read", "defect_check.py") == "allow"
+    assert _effective(attested, "glob", "*.md") == "allow"
+    assert _effective(attested, "read", ".env") == "deny"
+    assert _effective(attested, "read", "sub/.git/config") == "deny"
+    # The base snapshot is the ONLY outside tree, by absolute prefix.
+    assert _effective(attested, "read", f"{base.resolve()}/defect_check.py") == "allow"
+    assert _effective(attested, "read", f"{base.resolve()}/.env") == "deny"
+    assert _effective(attested, "external_directory", f"{base.resolve()}/x") == "allow"
+    assert _effective(attested, "external_directory", "/elsewhere/x") == "deny"
+    # The relative allow is Location-scoped in native v2 (real-native probe:
+    # absolute outside reads are denied despite the relative rule), so the
+    # only absolute resources any rule grants are inside the base prefix.
+    absolute_resources = [
+        rule["resource"] for rule in attested if rule["resource"].startswith("/")
+    ]
+    assert absolute_resources, "the base prefix must be granted absolutely"
+    assert all(
+        resource.startswith(f"{base.resolve()}/")
+        for resource in absolute_resources
+    )
+    # Reviews are always read-only.
+    assert _effective(attested, "edit", "README.md") == "deny"

@@ -277,12 +277,12 @@ async def test_external_evidence_mr_ask_is_a_real_snapshot_review(runner_env):
         assert "MR !188" in data["stdin"]
         # The external evidence still rides along as untrusted data.
         assert "PUBLIC_EVIDENCE_BODY" in data["stdin"]
-        # Snapshot reads are granted by absolute prefix; the watched checkout
-        # is never named as an audit subject.
+        # Snapshot reads are granted Location-relative (native confines
+        # relative reads to the working snapshot) plus an absolute prefix for
+        # the base snapshot; the watched checkout is never an audit subject.
         agent = json.loads(data["config"])["agents"]["oi"]
         rules = agent["permissions"]
-        assert {"action": "read", "resource": f"{head_dir}/*",
-                "effect": "allow"} in rules
+        assert {"action": "read", "resource": "*", "effect": "allow"} in rules
         assert {"action": "read", "resource": f"{base_dir}/*",
                 "effect": "allow"} in rules
         assert not any(

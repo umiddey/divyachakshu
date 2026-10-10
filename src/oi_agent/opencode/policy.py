@@ -183,15 +183,14 @@ def build_permission_policy(
     # grants no repository reads at all rather than over-claiming isolation.
     location_is_worktree_root = (primary / ".git").exists()
     if location_is_worktree_root or controller_snapshots:
-        if controller_snapshots:
-            # Controller-materialized snapshots are granted by absolute
-            # prefix: the requested value must start inside the snapshot
-            # tree, so escaping relative paths match no allow.
-            primary_scope = f"{primary}/*"
-        else:
-            primary_scope = "*"
+        # Native v2 confines relative read/glob resources to the active
+        # Location and only allows paths OUTSIDE it through explicit
+        # absolute-prefix rules, so a relative allow cannot escape the
+        # snapshot tree (proven on real native: relative in-Location reads
+        # succeed, "../escape" and absolute-outside reads are denied, and
+        # only the granted auxiliary prefix is readable).
         for action in _READ_ACTIONS:
-            rules.append(_rule(action, primary_scope, "allow"))
+            rules.append(_rule(action, "*", "allow"))
             rules.extend(_secret_rules(action))
     else:
         for action in _READ_ACTIONS:
