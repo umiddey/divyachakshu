@@ -39,8 +39,6 @@ from oi_agent.watch.attachments import (
     is_approved_attachment_url,
 )
 
-pytestmark = pytest.mark.asyncio
-
 
 class _FakeAttachment:
     """Minimal discord.py-shaped attachment object."""
@@ -75,6 +73,7 @@ def _candidate(attachment_id: str, payload: bytes, declared: int | None = None,
 # --- correction 6: caps end-to-end -------------------------------------------
 
 
+@pytest.mark.asyncio
 async def test_operator_count_cap_records_overflow_not_silence() -> None:
     prepared = await prepare_external_inputs(
         "hello",
@@ -90,6 +89,7 @@ async def test_operator_count_cap_records_overflow_not_silence() -> None:
     assert any("2-attachment limit" in note for r in limited for note in r.limitations)
 
 
+@pytest.mark.asyncio
 async def test_lying_declared_size_cannot_smuggle_oversized_bytes() -> None:
     """A small declared size must not bypass the per-item cap on download."""
     payload = b"x" * (MAX_ATTACHMENT_BYTES + 1)
@@ -102,6 +102,7 @@ async def test_lying_declared_size_cannot_smuggle_oversized_bytes() -> None:
     assert "downloaded size" in record.limitations[0]
 
 
+@pytest.mark.asyncio
 async def test_aggregate_byte_cap_enforced_on_actual_bytes() -> None:
     """Three max-size files bust the 16 MiB aggregate on ACTUAL bytes."""
     chunk = b"a" * MAX_ATTACHMENT_BYTES
@@ -166,6 +167,7 @@ def test_only_approved_discord_cdn_hosts_are_attachment_urls() -> None:
 # --- correction 7: honest rejected-image records -----------------------------
 
 
+@pytest.mark.asyncio
 async def test_malformed_image_bytes_get_explicit_unsupported_record() -> None:
     png_magic = b"\x89PNG\r\n\x1a\n" + b"garbage-that-is-not-a-png"
     prepared = await prepare_external_inputs("hello", [_candidate("img", png_magic)])
@@ -175,6 +177,7 @@ async def test_malformed_image_bytes_get_explicit_unsupported_record() -> None:
     assert "not usable" in record.limitations[0]
 
 
+@pytest.mark.asyncio
 async def test_oversized_pixel_image_is_rejected_by_budget(tmp_path: Path) -> None:
     """A real PNG past the pixel budget is refused, never attached."""
     from PIL import Image
@@ -188,6 +191,7 @@ async def test_oversized_pixel_image_is_rejected_by_budget(tmp_path: Path) -> No
     assert record.status == STATUS_UNSUPPORTED
 
 
+@pytest.mark.asyncio
 async def test_valid_image_prepares_and_records_native_file(tmp_path: Path) -> None:
     from PIL import Image
 

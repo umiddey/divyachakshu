@@ -7,6 +7,9 @@ and case-preserving HTML text extraction. No network access happens in this
 suite: HTTP transport itself is exercised by the witnessed smokes.
 """
 
+import asyncio
+import socket
+
 import pytest
 
 from oi_agent.external.records import EvidenceItem
@@ -14,7 +17,11 @@ from oi_agent.external.retrieval import (
     _WEB_ENDPOINT,
     RetrievalError,
     _parse_rss,
+    _PinnedResolver,
+    _validate_url,
+    fetch_public_document,
     html_to_text,
+    is_public_address,
     parse_hardened_xml,
 )
 
@@ -270,3 +277,196 @@ def test_aggregator_wrapper_html_is_never_attributed_to_publisher(monkeypatch):
     assert inputs.evidence[0].text == ""
     assert inputs.evidence[0].url == headline.url
     assert "headline only" in inputs.evidence[0].limitations[0]
+
+
+# --- review fix: SSRF boundaries ----------------------------------------------
+#
+# The retrieval security model refuses loopback, private, link-local/metadata,
+# CGNAT, multicast/reserved/unspecified, and IPv4-mapped addresses; URL
+# userinfo, non-HTTP(S) schemes, unusual ports, and non-public hosts; DNS
+# answers that contain ANY non-public address (rebinding shape); and redirect
+# hops that leave the validated public space. These tests pin each boundary.
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",          # loopback
+        "::1",                # IPv6 loopback
+        "10.1.2.3",           # 10/8
+        "172.16.0.1",         # 172.16/12 start
+        "172.31.255.255",     # 172.16/12 end
+        "192.168.1.1",        # 192.168/16
+        "169.254.169.254",    # link-local / cloud metadata
+        "100.64.0.1",         # carrier-grade NAT 100.64/10
+        "224.0.0.1",          # multicast
+        "ff02::1",            # IPv6 multicast
+        "0.0.0.0",            # unspecified
+        "::ffff:127.0.0.1",   # IPv4-mapped loopback
+        "192.0.2.1",          # TEST-NET-1 (reserved, non-global)
+    ],
+)
+def test_is_public_address_refuses_nonpublic_addresses(address):
+    """Every non-global, special-purpose address is refused."""
+    assert not is_public_address(address), address
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["93.184.216.34", "8.8.8.8", "2606:4700::1111"],
+)
+def test_is_public_address_allows_global_addresses(address):
+    """Globally routable addresses of both families are allowed."""
+    assert is_public_address(address), address
+
+
+@pytest.mark.parametrize(
+    ("url", "category"),
+    [
+        ("file:///etc/passwd", "scheme_not_allowed"),
+        ("ftp://example.com/file", "scheme_not_allowed"),
+        ("http://example.com:8080/", "port_not_allowed"),
+        ("http://user:pass@example.com/", "userinfo_not_allowed"),
+        ("http://localhost/", "host_not_public"),
+        ("http://metadata.google.internal/", "host_not_public"),
+        ("http://127.0.0.1/admin", "address_not_public"),
+        ("http://10.0.0.5/", "address_not_public"),
+        ("http://[fe80::1]/", "address_not_public"),
+        ("http://", "invalid_url"),
+        ("http://exa mple.com/", "invalid_url"),
+        ("http://example.com:99999/", "invalid_url"),
+    ],
+)
+def test_validate_url_refuses_with_honest_category(url, category):
+    """Every refused shape raises an honest bounded category, never a crash."""
+    with pytest.raises(RetrievalError) as excinfo:
+        _validate_url(url)
+    assert excinfo.value.category == category
+
+
+@pytest.mark.parametrize(
+    ("url", "host", "port"),
+    [
+        ("http://example.com/path", "example.com", 80),
+        ("https://example.com", "example.com", 443),
+        ("http://93.184.216.34/", "93.184.216.34", 80),
+        ("http://[2606:4700::1111]/", "2606:4700::1111", 80),
+    ],
+)
+def test_validate_url_accepts_public_urls(url, host, port):
+    """Public HTTP(S) URLs, including IPv6 literals, validate cleanly."""
+    assert _validate_url(url) == (host, port, url.split(":", 1)[0])
+
+
+class _FakeInnerResolver:
+    """Stand-in for the threaded resolver with a scripted answer set."""
+
+    def __init__(self, infos):
+        self._infos = list(infos)
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        return list(self._infos)
+
+    async def close(self):
+        pass
+
+
+def _resolve_with(infos, host):
+    """Run one pinned resolve inside a loop (ThreadedResolver needs one)."""
+
+    async def run():
+        resolver = _PinnedResolver()
+        resolver._inner = _FakeInnerResolver(infos)
+        return await resolver.resolve(host)
+
+    return asyncio.run(run())
+
+
+def _answer(*hosts):
+    return [
+        {"hostname": "host.example.com", "host": host,
+         "port": 443, "family": socket.AF_INET, "proto": socket.IPPROTO_TCP,
+         "flags": socket.AI_NUMERICSERV}
+        for host in hosts
+    ]
+
+
+def test_pinned_resolver_rejects_all_private_answer():
+    """A purely private answer set never becomes a connection target."""
+    with pytest.raises(RetrievalError) as excinfo:
+        _resolve_with(_answer("192.168.1.5"), "internal.example.com")
+    assert excinfo.value.category == "dns_answer_not_public"
+
+
+def test_pinned_resolver_rejects_mixed_public_private_answer():
+    """A public+private answer set is a rebinding shape and is refused whole."""
+    with pytest.raises(RetrievalError) as excinfo:
+        _resolve_with(_answer("93.184.216.34", "10.0.0.9"), "rebinding.example.com")
+    assert excinfo.value.category == "dns_answer_not_public"
+
+
+def test_pinned_resolver_accepts_all_public_answer():
+    """An all-public answer set passes through pinned, unchanged."""
+    resolved = _resolve_with(_answer("93.184.216.34", "8.8.8.8"), "example.com")
+    assert [info["host"] for info in resolved] == ["93.184.216.34", "8.8.8.8"]
+
+
+class _FakeResponse:
+    def __init__(self, status, headers):
+        self.status = status
+        self.headers = headers
+
+
+class _FakeResponseContext:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _ScriptedSession:
+    """Minimal aiohttp session stand-in serving scripted responses."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    def get(self, url, **kwargs):
+        assert self._responses, "fetch must not issue more requests than scripted"
+        return _FakeResponseContext(self._responses.pop(0))
+
+
+def _redirect(status, location):
+    return _FakeResponse(status, {"Location": location})
+
+
+@pytest.mark.parametrize(
+    ("location", "category"),
+    [
+        ("http://127.0.0.1/admin", "address_not_public"),
+        ("http://10.0.0.5/secret", "address_not_public"),
+        ("http://[fd00::1]/internal", "address_not_public"),
+        ("ftp://example.com/file", "scheme_not_allowed"),
+        ("file:///etc/passwd", "scheme_not_allowed"),
+    ],
+)
+def test_redirect_into_prohibited_destination_is_refused(monkeypatch, location, category):
+    """A redirect hop is re-validated: loopback, private, and non-HTTP die."""
+    from oi_agent.external import retrieval
+
+    session = _ScriptedSession([_redirect(302, location)])
+    monkeypatch.setattr(retrieval, "_session", lambda: session)
+
+    with pytest.raises(RetrievalError) as excinfo:
+        asyncio.run(fetch_public_document("http://public.example.com/start"))
+    assert excinfo.value.category == category
+    assert not session._responses, "no second request may be issued after refusal"

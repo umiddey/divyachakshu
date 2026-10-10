@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -185,6 +186,12 @@ def is_public_address(address: str) -> bool:
     return True
 
 
+# A netloc carrying brackets must be exactly a bracketed IPv6 literal with an
+# optional port, so genuinely public IPv6 destinations validate while stray
+# brackets (split-host confusion, userinfo smuggles) stay malformed.
+_BRACKETED_NETLOC_RE = re.compile(r"^\[[0-9A-Fa-f:.]+\](?::\d+)?$")
+
+
 def _validate_url(url: str) -> tuple[str, int, str]:
     """Validate scheme, userinfo, host, and port before any socket is opened.
 
@@ -204,7 +211,13 @@ def _validate_url(url: str) -> tuple[str, int, str]:
     host = (parts.hostname or "").strip().rstrip(".").lower()
     if not host:
         raise RetrievalError("invalid_url")
-    if not parts.netloc or any(ch in parts.netloc for ch in "[]\\ \t"):
+    netloc = parts.netloc
+    if not netloc or any(ch in netloc for ch in "\\ \t"):
+        raise RetrievalError("invalid_url")
+    if ("[" in netloc or "]" in netloc) and not _BRACKETED_NETLOC_RE.fullmatch(netloc):
+        # Brackets are only ever a whole IPv6 literal; anything else is a
+        # malformed authority, not an exotic host. A validated literal then
+        # meets the same public-address policy as every other destination.
         raise RetrievalError("invalid_url")
     if host in _BLOCKED_HOSTS or host.endswith(_BLOCKED_HOST_SUFFIXES):
         raise RetrievalError("host_not_public")
