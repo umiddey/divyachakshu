@@ -12,7 +12,12 @@ from pathlib import Path
 
 from .paths import OpenCodePaths
 
-MIN_OPENCODE_VERSION = (1, 18, 0)
+# The implemented contract is native v2 only. v1 used `agent.<id>.permission`
+# maps and v1 action names (`bash`, `task`) that v2 ignores, so a v1 binary
+# would run the model under the native allow-by-default base policy while OI
+# believed it was confined. v1 is therefore rejected outright rather than
+# carried with a compatibility shim that would not be enforced.
+MIN_OPENCODE_VERSION = (2, 0, 0)
 INSTALL_DOCS_URL = "https://opencode.ai/docs/#install"
 _VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
 _MODEL_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_./:@+-]+)")
@@ -99,6 +104,16 @@ def check_version(binary: str, paths: OpenCodePaths) -> OpenCodeVersion:
             "OpenCode returned no parseable compatible version"
         )
     version = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    # Exactly major 2. A future major could change the permission schema
+    # entirely, and silently running under an unproven contract is the same
+    # failure as running under v1's ignored rules.
+    if version[0] != MIN_OPENCODE_VERSION[0]:
+        raise OpenCodeBootstrapError(
+            f"OpenCode {'.'.join(map(str, version))} is not a supported native v"
+            f"{MIN_OPENCODE_VERSION[0]} release; OI implements the v"
+            f"{MIN_OPENCODE_VERSION[0]} permission contract only. Install a v"
+            f"{MIN_OPENCODE_VERSION[0]} release from {INSTALL_DOCS_URL}"
+        )
     if version < MIN_OPENCODE_VERSION:
         minimum = ".".join(map(str, MIN_OPENCODE_VERSION))
         raise OpenCodeBootstrapError(

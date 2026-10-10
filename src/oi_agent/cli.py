@@ -818,6 +818,8 @@ def config_show(
         "opencode_timeout_seconds", "environment_mode", "write_mode",
         "write_dirs", "max_session_turns", "session_ttl_days", "reminder_channel_id",
         "max_context_messages", "max_context_age_days",
+        "external_inputs", "max_external_evidence_items", "max_attachments",
+        "max_attachment_bytes", "image_inputs",
     ):
         console.print(f"{name} = {getattr(cfg, name)}")
     for target in cfg.watches:
@@ -855,6 +857,8 @@ def config_set(
         "opencode_timeout_seconds", "environment_mode", "write_mode",
         "write_dirs", "max_session_turns", "session_ttl_days",
         "max_context_messages", "max_context_age_days", "reminder_channel_id",
+        "external_inputs", "max_external_evidence_items", "max_attachments",
+        "max_attachment_bytes", "image_inputs",
     }
     if key not in allowed:
         console.print(f"[red]unknown key '{key}'[/red]")

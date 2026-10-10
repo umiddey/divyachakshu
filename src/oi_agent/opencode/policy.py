@@ -134,8 +134,9 @@ def build_permission_policy(
     *,
     write_mode: str = "read-only",
     write_dirs: list[str] | tuple[str, ...] | None = None,
+    controller_snapshots: bool = False,
 ) -> list[dict[str, str]]:
-    """Return the ordered fail-closed OpenCode v2 agent permission rules.
+    """Return the ordered fail-closed OpenCode v2 permission rules.
 
     OpenCode matches ``read``/``edit``/``external_directory`` resources against
     the active Location, which OI sets to the primary repository via the
@@ -153,6 +154,16 @@ def build_permission_policy(
             ``edit`` for ``*.md``/``*.txt`` only). Unknown modes fail closed.
         write_dirs: Optional repo-relative scopes for doc writes; empty means
             any ``.md``/``.txt`` in the repository.
+        controller_snapshots: True only when ``repo_root`` and every
+            additional root is a controller-materialized review snapshot:
+            a verified-SHA tree the trusted controller wrote itself, with
+            symlinks rejected and no ``.git`` inside. Such roots are never
+            worktree roots, so the ``.git`` boundary check below would
+            fail-closed deny every read of the very trees the review must
+            audit. With the attestation, grants are ABSOLUTE path prefixes
+            instead of Location-relative allows, so a relative path that
+            escapes the snapshot directory simply matches no allow and stays
+            denied. Ordinary repository audits never set this.
 
     Returns:
         Ordered native v2 permission rules.
@@ -171,9 +182,16 @@ def build_permission_policy(
     # confinement cannot be expressed as a prefix rule, so OI fails closed and
     # grants no repository reads at all rather than over-claiming isolation.
     location_is_worktree_root = (primary / ".git").exists()
-    if location_is_worktree_root:
+    if location_is_worktree_root or controller_snapshots:
+        if controller_snapshots:
+            # Controller-materialized snapshots are granted by absolute
+            # prefix: the requested value must start inside the snapshot
+            # tree, so escaping relative paths match no allow.
+            primary_scope = f"{primary}/*"
+        else:
+            primary_scope = "*"
         for action in _READ_ACTIONS:
-            rules.append(_rule(action, "*", "allow"))
+            rules.append(_rule(action, primary_scope, "allow"))
             rules.extend(_secret_rules(action))
     else:
         for action in _READ_ACTIONS:
@@ -191,6 +209,7 @@ def build_permission_policy(
             # paths could leave the configured scope (and even the intended
             # repository) while staying inside an enclosing worktree. This
             # holds for a configured scope too, not only "any doc".
+            # Controller snapshots are always read-only runs.
             rules.append(_rule("edit", "*", "deny"))
     else:
         rules.append(_rule("edit", "*", "deny"))
@@ -203,8 +222,9 @@ def build_permission_policy(
         boundary = extra.expanduser().resolve()
         # An auxiliary root is only granted when it is its own worktree root:
         # otherwise reads could escape into the parent worktree exactly as the
-        # Location case above.
-        if not (boundary / ".git").exists():
+        # Location case above. Controller-materialized snapshots carry the
+        # caller's attestation instead of a ``.git`` boundary.
+        if not (boundary / ".git").exists() and not controller_snapshots:
             continue
         absolute = str(boundary)
         rules.append(_rule("external_directory", f"{absolute}/*", "allow"))
@@ -224,6 +244,7 @@ def build_agent_config(
     *,
     write_mode: str = "read-only",
     write_dirs: list[str] | tuple[str, ...] | None = None,
+    controller_snapshots: bool = False,
 ) -> dict[str, object]:
     """Build the native primary ``agents.oi`` OpenCode v2 configuration.
 
@@ -235,6 +256,9 @@ def build_agent_config(
         additional_repo_roots: Optional auxiliary repository roots.
         write_mode: ``"read-only"`` or ``"docs-only"`` (unknown fails closed).
         write_dirs: Optional repo-relative scopes for doc writes.
+        controller_snapshots: Attestation that every authorized root is a
+            controller-materialized, verified-SHA review snapshot (see
+            :func:`build_permission_policy`).
 
     Returns:
         JSON-compatible native v2 agent configuration.
@@ -245,6 +269,7 @@ def build_agent_config(
         additional_repo_roots=additional_repo_roots,
         write_mode=write_mode,
         write_dirs=write_dirs,
+        controller_snapshots=controller_snapshots,
     )
     return _envelope({
         "agents": {
@@ -297,8 +322,13 @@ def build_tool_free_agent(
     history-window spec). The broad deny is not merely a read policy: with
     every action denied the agent has no repository, network, or filesystem
     authority, matching the v1 ``{"*": "deny"}`` intent under the v2 contract.
+
+    The run-wide envelope applies here too: the top-level deny-all keeps
+    native v2's hidden maintenance agents (notably ``compaction``) from
+    running under the allow-by-default base policy during interpretation
+    queries, and automatic snapshot/formatter mutation stays off.
     """
-    return {
+    return _envelope({
         "agents": {
             "oi_eval": {
                 "description": "Bounded interpretation agent with no tools",
@@ -309,4 +339,4 @@ def build_tool_free_agent(
                 "permissions": [_rule("*", "*", "deny")],
             }
         }
-    }
+    })

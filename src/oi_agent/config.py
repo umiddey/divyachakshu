@@ -18,6 +18,19 @@ WRITE_MODES = ("read-only", "docs-only")
 DISCORD_MAX_MESSAGE_CHARS = 2_000
 LEGACY_KEYS = {"agent", "llm", "api_key", "base_url", "search_aliases", "provider", "model"}
 
+# Controller-owned external inputs. ``disabled`` is the conservative default:
+# an operator opts in with `oi config set external_inputs read-only`, which
+# permits public web/news retrieval and attachment inspection. The native
+# model never receives network tools either way.
+EXTERNAL_INPUT_MODES = ("disabled", "read-only")
+
+# Native model image capability cannot be proven: the native models catalog
+# reports ``capabilities.input`` but default-ASSUMES image support for
+# uncatalogued models, which is not proof. OI therefore does not guess. The
+# operator states the capability explicitly, and the default is the honest
+# non-vision behavior: images are described as metadata, never guessed at.
+IMAGE_INPUT_MODES = ("off", "on")
+
 
 @dataclass
 class WatchTarget:
@@ -94,6 +107,11 @@ class Config:
     max_context_messages: int = 200
     max_context_age_days: int = 30
     reminder_channel_id: int = 0
+    external_inputs: str = "disabled"
+    max_external_evidence_items: int = 8
+    max_attachments: int = 4
+    max_attachment_bytes: int = 8 * 1024 * 1024
+    image_inputs: str = "off"
     watches: list[WatchTarget] = field(default_factory=list)
 
     @property
@@ -287,6 +305,15 @@ def load_config(
         max_context_messages=_require_int(raw, "max_context_messages", 200),
         max_context_age_days=_require_int(raw, "max_context_age_days", 30),
         reminder_channel_id=_require_int(raw, "reminder_channel_id", 0),
+        external_inputs=_require_string(raw, "external_inputs", "disabled"),
+        max_external_evidence_items=_require_int(
+            raw, "max_external_evidence_items", 8
+        ),
+        max_attachments=_require_int(raw, "max_attachments", 4),
+        max_attachment_bytes=_require_int(
+            raw, "max_attachment_bytes", 8 * 1024 * 1024
+        ),
+        image_inputs=_require_string(raw, "image_inputs", "off"),
     )
     for watch in watches_raw:
         if not isinstance(watch, dict):
@@ -367,6 +394,19 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(
             f"write_mode must be one of {WRITE_MODES!r} (got {cfg.write_mode!r})"
         )
+    if cfg.external_inputs not in EXTERNAL_INPUT_MODES:
+        raise ValueError(
+            f"external_inputs must be one of {EXTERNAL_INPUT_MODES!r} "
+            f"(got {cfg.external_inputs!r}); enable with "
+            "`oi config set external_inputs read-only`"
+        )
+    if cfg.image_inputs not in IMAGE_INPUT_MODES:
+        raise ValueError(
+            f"image_inputs must be one of {IMAGE_INPUT_MODES!r} "
+            f"(got {cfg.image_inputs!r}); image capability cannot be proven "
+            "automatically, so it must be stated explicitly with "
+            "`oi config set image_inputs on`"
+        )
     if not isinstance(cfg.write_dirs, list):
         raise ValueError(f"write_dirs must be a list of strings (got {cfg.write_dirs!r})")
     for entry in cfg.write_dirs:
@@ -380,12 +420,16 @@ def validate_config(cfg: Config) -> None:
     for name, minimum in (("max_reply_chars", 200), ("opencode_steps", 1),
                           ("opencode_timeout_seconds", 1), ("max_session_turns", 1),
                           ("session_ttl_days", 0), ("max_context_messages", 40),
-                          ("max_context_age_days", 1)):
+                          ("max_context_age_days", 1),
+                          ("max_external_evidence_items", 1), ("max_attachments", 0),
+                          ("max_attachment_bytes", 1024)):
         value = getattr(cfg, name)
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{name} must be an integer (got {value!r})")
         maximum = {"opencode_steps": 50, "opencode_timeout_seconds": 86_400,
-                   "max_context_messages": 1_000, "max_context_age_days": 365}.get(name)
+                   "max_context_messages": 1_000, "max_context_age_days": 365,
+                   "max_external_evidence_items": 50, "max_attachments": 16,
+                   "max_attachment_bytes": 32 * 1024 * 1024}.get(name)
         if value < minimum or (maximum is not None and value > maximum):
             bound = f"[{minimum}, {maximum}]" if maximum else f">= {minimum}"
             raise ValueError(f"{name} must be in {bound} (got {value})")
@@ -494,6 +538,11 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"max_context_messages = {cfg.max_context_messages}",
         f"max_context_age_days = {cfg.max_context_age_days}",
         f"reminder_channel_id = {cfg.reminder_channel_id}",
+        f"external_inputs = {json.dumps(cfg.external_inputs)}",
+        f"max_external_evidence_items = {cfg.max_external_evidence_items}",
+        f"max_attachments = {cfg.max_attachments}",
+        f"max_attachment_bytes = {cfg.max_attachment_bytes}",
+        f"image_inputs = {json.dumps(cfg.image_inputs)}",
     ]
     for target in cfg.watches:
         lines.append("")

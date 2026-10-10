@@ -520,6 +520,40 @@ def _review_prompt_section(snapshot: ReviewSnapshot) -> str:
     )
 
 
+def _external_evidence_section(prepared: PreparedExternal | None) -> str:
+    """Render the controller-provided external-evidence prompt section.
+
+    Reviews that also carry an attachment or public-evidence ask keep their
+    snapshot provenance AND state the external evidence honestly. The block
+    is delimited untrusted data; it never changes what is audited.
+    """
+    if prepared is None or not prepared.inputs.has_external_content:
+        return ""
+    return (
+        "\nCONTROLLER-PROVIDED EXTERNAL EVIDENCE (UNTRUSTED DATA):\n"
+        f"{render_evidence_block(prepared.inputs)}\n"
+    )
+
+
+def _merge_error_class(
+    error_class: str | None,
+    event_error: str | None,
+    completion: NativeCompletion,
+) -> str | None:
+    """Pick the most honest bounded failure class for one run.
+
+    A stream-level root cause (an in-stream error event such as an auth
+    failure, or a protocol violation) outranks the completion gate's bounded
+    echo of the same refusal: the gate still refuses the answer either way,
+    but the operator learns WHY. When selection merely echoes the completion
+    class (or the stream is empty/timed out), the process-level class that
+    already describes the run wins.
+    """
+    if event_error is not None and event_error != completion.error_class:
+        return event_error
+    return error_class or event_error
+
+
 TRUNCATION_MARKER = "\n\n[reply truncated]"
 
 
@@ -815,7 +849,10 @@ class OpenCodeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=environment,
-                cwd=str(Path.home()),
+                # The interpretation agent has no repository binding: its
+                # working directory is the isolated native home, never an
+                # operator directory.
+                cwd=str(paths.home),
                 start_new_session=(os.name == "posix"),
             )
             assert process.stdin is not None
@@ -1047,7 +1084,9 @@ class OpenCodeRunner:
             text, _session, event_error, text_parts = _select_final_text_v2(
                 events, completion
             )
-            error_class = error_class or event_error
+            error_class = _merge_error_class(
+                error_class, event_error, completion
+            )
             if error_class is None:
                 text, marker_error = _extract_marked_answer(text)
                 error_class = marker_error
@@ -1189,7 +1228,9 @@ class OpenCodeRunner:
         text, returned_session, event_error, text_parts = _select_final_text_v2(
             events, completion
         )
-        error_class = error_class or event_error
+        error_class = _merge_error_class(
+            error_class, event_error, completion
+        )
         if error_class is None:
             text, marker_error = _extract_marked_answer(text)
             error_class = marker_error
@@ -1249,6 +1290,7 @@ class OpenCodeRunner:
         write_dirs: list[str] | tuple[str, ...] | None = None,
         files: list[Path] | None = None,
         disposable: DisposableNativeRoot | None = None,
+        controller_snapshots: bool = False,
     ) -> tuple[
         list[dict[str, Any]], int, str, int | None, str | None, int, NativeCompletion
     ]:
@@ -1276,6 +1318,9 @@ class OpenCodeRunner:
             disposable: Private native root for external-evidence runs. When
                 supplied, the run never touches the ordinary conversation
                 storage and the caller deletes the root afterwards.
+            controller_snapshots: True only for review runs, whose roots are
+                controller-materialized verified-SHA snapshots (see
+                :func:`build_permission_policy`).
 
         Returns:
             ``(events, stderr_bytes, stderr_sample, returncode, error_class,
@@ -1290,6 +1335,7 @@ class OpenCodeRunner:
             additional_repo_roots=additional_roots,
             write_mode=write_mode,
             write_dirs=write_dirs,
+            controller_snapshots=controller_snapshots,
         )
         argv = [
             binary,
@@ -1400,16 +1446,25 @@ class OpenCodeRunner:
         excerpt: str,
         bot_name: str = "",
         bot_id: int | None = None,
+        prepared: PreparedExternal | None = None,
     ) -> Reply:
         """Execute one MR/PR audit against controller-owned base/head snapshots.
 
         The watched checkout is neither refreshed nor audited: the review
         subject is the immutable snapshot pair the trusted controller fetched
-        read-only from the configured origin. Only the head snapshot (primary
-        ``--dir``) and the base snapshot (explicit auxiliary root) are
-        authorized; other configured repositories are excluded from review
-        sessions. No OpenCode session is resumed and none is returned, so
-        review runs cannot reuse or store conversation branch-audit context.
+        read-only from the configured origin. Only the head snapshot (the
+        subprocess working directory) and the base snapshot (explicit
+        auxiliary root) are authorized; other configured repositories are
+        excluded from review sessions. No OpenCode session is resumed and
+        none is returned, so review runs cannot reuse or store conversation
+        branch-audit context.
+
+        When ``prepared`` carries external evidence (an attachment or news ask
+        that also references this MR/PR), the run stays a real snapshot
+        review: the controller-rendered evidence rides along as clearly
+        delimited untrusted data, and the run gets the same disposable native
+        storage as any external run because the harness persists prompt text
+        and attachment bytes.
 
         Args:
             review_target: Reference resolved against configured repositories.
@@ -1418,6 +1473,7 @@ class OpenCodeRunner:
             excerpt: Bounded Discord conversation excerpt.
             bot_name: Discord display name the agent posts under.
             bot_id: Stable Discord user id of the agent's bot account.
+            prepared: Optional controller-prepared external evidence.
 
         Returns:
             Bounded Reply whose provenance is the MR form
@@ -1447,6 +1503,7 @@ class OpenCodeRunner:
                 f"From: {author}\n\n"
                 f"{_review_prompt_section(snapshot)}\n"
                 f"AUDITED SHA: {provenance}\n"
+                f"{_external_evidence_section(prepared)}"
                 f"THREAD CONTEXT:\n{excerpt or '(start of conversation)'}\n\n"
                 f"LATEST QUESTION:\n{question}"
             )
@@ -1471,22 +1528,53 @@ class OpenCodeRunner:
                 environment_mode=self._cfg.resolved_environment_mode,
                 bot_name=bot_name,
                 bot_id=bot_id,
+                external_inputs=prepared is not None,
             )
-            (
-                events, stderr_bytes, stderr_sample, returncode,
-                error_class, duration_ms, completion,
-            ) = (
-                await self._execute_agent(
-                    binary=binary,
-                    root=snapshot.head_dir,
-                    additional_roots=[snapshot.base_dir],
-                    prompt_str=prompt_str,
-                    prompt=prompt,
-                    session_id=None,
+            # An external-evidence review is still an external run: native
+            # storage would otherwise persist the prompt text and any
+            # attachment bytes under ordinary conversation state, so it gets
+            # the same disposable root and credential copy as
+            # run_external_evidence, and it is deleted in the finally below.
+            disposable: DisposableNativeRoot | None = None
+            files: list[Path] = []
+            if prepared is not None:
+                disposable = DisposableNativeRoot()
+                try:
+                    target_db = await initialize_native_schema(binary, disposable)
+                    copied = copy_isolated_credentials(
+                        native_db_path(resolve_opencode_paths().data_home), target_db
+                    )
+                except BaseException:
+                    disposable.close()
+                    raise
+                if copied == 0:
+                    disposable.close()
+                    return _review_failure("no_isolated_credentials", sha=provenance)
+                files = self._vision_attachments(prepared)
+            try:
+                (
+                    events, stderr_bytes, stderr_sample, returncode,
+                    error_class, duration_ms, completion,
+                ) = (
+                    await self._execute_agent(
+                        binary=binary,
+                        root=snapshot.head_dir,
+                        additional_roots=[snapshot.base_dir],
+                        prompt_str=prompt_str,
+                        prompt=prompt,
+                        session_id=None,
+                        files=files,
+                        disposable=disposable,
+                        controller_snapshots=True,
+                    )
                 )
-            )
+            finally:
+                if disposable is not None:
+                    disposable.close()
             text, _, event_error, text_parts = _select_final_text_v2(events, completion)
-            error_class = error_class or event_error
+            error_class = _merge_error_class(
+                error_class, event_error, completion
+            )
             if error_class is None:
                 text, marker_error = _extract_marked_answer(text)
                 error_class = marker_error

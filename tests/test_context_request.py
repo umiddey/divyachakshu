@@ -24,7 +24,6 @@ from oi_agent.watch.context_request import (
 )
 from oi_agent.watch.discord_client import _thread_excerpt
 
-
 # ---------------------------------------------------------------- gate
 
 
@@ -274,16 +273,21 @@ async def test_thread_excerpt_honors_limit_and_after():
     channel = _WindowChannel(messages)
 
     default_text = await _thread_excerpt(channel, bot_user_id=99)
-    assert len(default_text.splitlines()) == 8
+    lines = default_text.splitlines()
+    # The first line is the honest bounded-window header, then the messages.
+    assert lines[0].startswith("CONVERSATION HISTORY (UNTRUSTED DATA):")
+    assert len(lines) == 9
 
     widened = await _thread_excerpt(channel, 4, bot_user_id=99)
-    assert len(widened.splitlines()) == 4
+    assert len(widened.splitlines()) == 5
 
     cutoff = now - timedelta(hours=3)
     windowed = await _thread_excerpt(channel, 8, bot_user_id=99, after=cutoff)
     lines = windowed.splitlines()
-    assert 0 < len(lines) <= 3
-    assert all(str(m.message_id) not in windowed for m in messages[3:])
+    assert lines[0].startswith("CONVERSATION HISTORY (UNTRUSTED DATA):")
+    assert 0 < len(lines) <= 4
+    body = "\n".join(lines[1:])
+    assert all(f"[{m.message_id}]" not in body for m in messages[3:])
 
 
 class _DirectionalChannel:
@@ -320,12 +324,14 @@ async def test_since_window_returns_earliest_messages():
     cutoff = now - timedelta(days=6)
 
     text = await _thread_excerpt(channel, 3, bot_user_id=99, after=cutoff)
-    ids = [line.split("]")[0][1:] for line in text.splitlines()]
+    lines = text.splitlines()
+    assert lines[0].startswith("CONVERSATION HISTORY (UNTRUSTED DATA):")
+    ids = [line.split("]")[0][1:] for line in lines[1:]]
     assert ids == ["3", "4", "5"], "must return the EARLIEST window messages"
 
     # Count-only ask keeps newest semantics.
     recent = await _thread_excerpt(channel, 3, bot_user_id=99)
-    ids = [line.split("]")[0][1:] for line in recent.splitlines()]
+    ids = [line.split("]")[0][1:] for line in recent.splitlines()[1:]]
     assert ids == ["6", "7", "8"]
 
 

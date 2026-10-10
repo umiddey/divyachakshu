@@ -147,18 +147,39 @@ def _create_mock_opencode(tmp_path: Path, mutate_repo: Path | None = None) -> Pa
         mutate_snippet = f'with open("{mutate_repo}/dirty.txt", "w") as f: f.write("dirty\\n")'
 
     body = f"""#!{sys.executable}
-import json, sys
+import json, os, sqlite3, sys
 {mutate_snippet}
 part = {{"id": "p2", "messageID": "msg-1", "sessionID": "sess-multi",
-        "type": "text", "text": "[[OI_FINAL_ANSWER]]\\nMulti-repo audit completed"}}
+        "type": "text", "text": "[[OI_FINAL_ANSWER]]\\nMulti-repo audit completed",
+        "time": {{"start": 0, "end": 1}}}}
 print(json.dumps({{"type": "step_start", "timestamp": 0, "sessionID": "sess-multi",
                   "part": {{"id": "p1", "messageID": "msg-1",
                            "sessionID": "sess-multi", "type": "step-start"}}}}))
 print(json.dumps({{"type": "text", "timestamp": 0, "sessionID": "sess-multi", "part": part}}))
-print(json.dumps({{"type": "step_finish", "timestamp": 0, "sessionID": "sess-multi",
-                  "part": {{"id": "p3", "messageID": "msg-1",
-                           "sessionID": "sess-multi", "type": "step-finish",
-                           "reason": "stop"}}}}))
+data_home = os.environ.get("XDG_DATA_HOME")
+if data_home:
+    db_path = os.path.join(data_home, "opencode", "opencode.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS session_message "
+            "(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg-1", "sess-multi", "assistant", 10,
+             '{{"finish": "stop", "time": {{"completed": 123}}}}'),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg-1-idle", "sess-multi", "idle", 11, '{{"outcome": "succeeded"}}'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 """
     script_path.write_text(body, encoding="utf-8")
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)

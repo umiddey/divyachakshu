@@ -1,6 +1,7 @@
 """Behavioral tests for the async OpenCode runner boundary."""
 
 import asyncio
+import fnmatch
 import json
 import os
 import stat
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from oi_agent.config import Config, WatchTarget
+from oi_agent.opencode.native import NativeCompletion
 from oi_agent.opencode.paths import resolve_opencode_paths
 from oi_agent.opencode.prompt import FINAL_OUTPUT_MARKER
 from oi_agent.opencode.provenance import worktree_fingerprint
@@ -20,7 +22,7 @@ from oi_agent.opencode.runner import (
     OpenCodeRunner,
     _bounded_text,
     _error_class,
-    _select_final_text,
+    _select_final_text_v2,
 )
 
 SESSION = "session-123"
@@ -54,10 +56,11 @@ def _event(event_type, part, **extra):
 
 
 def _tool_step(msg, narration_part_id, narration):
-    """One tool-loop step: start, narration text, tool call, tool-calls finish."""
+    """One real v2 tool-loop step: start, narration text, tool call, tool-calls finish."""
     return [
         _event("step_start", _part("step-start", msg, msg + "-s")),
-        _event("text", _part("text", msg, narration_part_id, text=narration)),
+        _event("text", _part("text", msg, narration_part_id, text=narration,
+                             time={"start": 0, "end": 1})),
         _event("tool_use", _part("tool", msg, msg + "-t", tool="read",
                                  callID="call-" + msg,
                                  state={"status": "completed",
@@ -67,27 +70,35 @@ def _tool_step(msg, narration_part_id, narration):
     ]
 
 
-def _final_step(msg, parts, reason="stop", finish=True, marked=False):
-    """Final assistant message: start, text parts, then its completion marker."""
+def _final_step(msg, parts, marked=False):
+    """Real v2 final assistant message: start, text parts, NO step_finish.
+
+    Native v2 emits no terminal ``step_finish`` for the final answer; text
+    parts carry ``time.end`` once closed. Completion is proven from the
+    native database, not the stream, so the fixture mirrors that exactly.
+    """
     stream = [_event("step_start", _part("step-start", msg, msg + "-s"))]
     first_part_id = parts[0][0] if parts else None
     for part_id, text in parts:
         if marked and part_id == first_part_id:
             text = f"{FINAL_OUTPUT_MARKER}\n{text}"
-        stream.append(_event("text", _part("text", msg, part_id, text=text)))
-    if finish:
-        stream.append(_event("step_finish", _part("step-finish", msg, msg + "-f",
-                                                  reason=reason)))
+        stream.append(_event("text", _part("text", msg, part_id, text=text,
+                                           time={"start": 0, "end": 1})))
     return stream
 
 
-def _pinned_stream(final_parts, final_reason="stop", finish_final=True):
+def _final_closed(msg, parts, reason="stop", marked=False):
+    """A final message that a (hostile or legacy) stream closes with step_finish."""
+    return _final_step(msg, parts, marked=marked) + [
+        _event("step_finish", _part("step-finish", msg, msg + "-f", reason=reason)),
+    ]
+
+
+def _pinned_stream(final_parts, marked=True):
     """Canonical narration -> tool -> narration -> marked final answer stream."""
     stream = _tool_step("msg_narration_a", "tx1", "Checking the repository now.")
     stream += _tool_step("msg_narration_b", "tx2", "Narrowing the answer down.")
-    return stream + _final_step("msg_final", final_parts,
-                                reason=final_reason, finish=finish_final,
-                                marked=True)
+    return stream + _final_step("msg_final", final_parts, marked=marked)
 
 
 _ERROR_EVENT = {"type": "error", "timestamp": 1, "sessionID": SESSION,
@@ -108,6 +119,21 @@ _HOSTILE_PAYLOAD = (
 _HOSTILE_ERROR_EVENT = {"type": "error", "timestamp": 1, "sessionID": SESSION,
                         "error": _HOSTILE_PAYLOAD}
 
+# Which behaviors get native completion proof written into the fake native
+# database, and of which shape. ``ok`` proves finish=stop + idle succeeded
+# (the only accepted terminal state); the other variants prove exactly one
+# rejected completion class so the runner's DB gate is exercised end to end.
+_PROOF_MODES = {
+    "success": "ok", "raw": "ok", "multipart": "ok", "reasoning": "ok",
+    "unframed_planning": "ok", "large_stderr": "ok",
+    "ambiguous": "ok", "conflicting_part": "ok", "unknown_event": "ok",
+    "error_after_text": "ok", "post_finish_text": "ok",
+    "hostile_string_error": "ok", "hostile_name_error": "ok",
+    "unproven": "none", "not_stopped": "not_stopped",
+    "no_idle": "no_idle", "idle_error": "idle_error",
+    "missing_id": "none",
+}
+
 _STREAMS = {
     "success": _pinned_stream([("p9", "UNIQUE_MARKER")]),
     "raw": (
@@ -123,23 +149,28 @@ _STREAMS = {
         _event("reasoning", _part("reasoning", "msg_final", "r1",
                                   text="REASONING_MARKER")),
         _event("text", _part("text", "msg_final", "p9",
-                             text=f"{FINAL_OUTPUT_MARKER}\nUNIQUE_MARKER")),
-        _event("step_finish", _part("step-finish", "msg_final", "f9",
-                                    reason="stop")),
+                             text=f"{FINAL_OUTPUT_MARKER}\nUNIQUE_MARKER",
+                             time={"start": 0, "end": 1})),
     ],
-    "no_completion": _pinned_stream([("p9", "UNIQUE_MARKER")], finish_final=False),
-    "midloop_end": _pinned_stream([("p9", "UNIQUE_MARKER")],
-                                  final_reason="tool-calls"),
-    "ambiguous": _pinned_stream([("p9", "FIRST_FINAL")]) + _final_step(
-        "msg_extra", [("p20", "SECOND_FINAL")]),
-    "incomplete_reason": _pinned_stream([("p9", "UNIQUE_MARKER")],
-                                        final_reason="length"),
+    # A structurally valid v2 stream with NO completion proof: the answer is
+    # unverifiable and must fail closed on the native state gate alone.
+    "unproven": _pinned_stream([("p9", "UNIQUE_MARKER")]),
+    # Native DB says the reported message did not stop cleanly.
+    "not_stopped": _pinned_stream([("p9", "UNIQUE_MARKER")]),
+    # Native DB proves the stop but the session never reported idle success.
+    "no_idle": _pinned_stream([("p9", "UNIQUE_MARKER")]),
+    # The terminal idle record reports failure.
+    "idle_error": _pinned_stream([("p9", "UNIQUE_MARKER")]),
+    # A trailing message native state never confirmed (only a step_start)
+    # makes the deliverable answer ambiguous.
+    "ambiguous": _pinned_stream([("p9", "FIRST_FINAL")]) + [
+        _event("step_start", _part("step-start", "msg_extra", "s20")),
+    ],
+    # A text part without a messageID cannot be bound to native proof.
     "missing_id": [
         _event("step_start", _part("step-start", "msg_final", "s9")),
         {"type": "text", "timestamp": 0, "sessionID": SESSION,
          "part": {"id": "p9", "type": "text", "text": "UNIQUE_MARKER"}},
-        _event("step_finish", _part("step-finish", "msg_final", "f9",
-                                    reason="stop")),
     ],
     "conflicting_part": _pinned_stream([("p9", "FIRST"), ("p9", "SECOND")]),
     "unknown_event": _pinned_stream([("p9", "UNIQUE_MARKER")]) + [
@@ -162,30 +193,80 @@ _STREAMS = {
                 "p9",
                 text="The latest question is essentially the same as before. "
                 "I've already gathered the evidence. Let me be punchier this time.",
+                time={"start": 0, "end": 1},
             ),
         ),
-        _event(
-            "step_finish",
-            _part("step-finish", "msg_final", "f9", reason="stop"),
-        ),
     ],
-    "post_finish_text": _pinned_stream([("p9", "UNIQUE_MARKER")]) + [
+    # A stream that closes the final message and then smuggles one more text
+    # part into it is malformed, proof or no proof.
+    "post_finish_text": _final_closed("msg_final", [("p9", "UNIQUE_MARKER")],
+                                      marked=True) + [
         _event("text", _part("text", "msg_final", "late", text="SMUGGLED")),
     ],
     "large_stderr": _pinned_stream([("p9", "with stderr")]),
 }
 
+_PROOF_WRITER = '''
+
+def _write_proof():
+    """Mirror the native v2 completion rows the run itself would have written."""
+    import os, sqlite3
+    mode = "__PROOF_MODE__"
+    if mode == "none":
+        return
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if not data_home:
+        return
+    db_path = os.path.join(data_home, "opencode", "opencode.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS session_message "
+            "(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+        )
+        finish, idle_outcome, with_idle = "stop", "succeeded", True
+        if mode == "not_stopped":
+            finish = "length"
+        elif mode == "no_idle":
+            with_idle = False
+        elif mode == "idle_error":
+            idle_outcome = "error"
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg_final", "__SESSION__", "assistant", 10,
+             '{"finish": "' + finish + '", "time": {"completed": 123}}'),
+        )
+        if with_idle:
+            connection.execute(
+                "INSERT OR REPLACE INTO session_message "
+                "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+                ("msg_final-idle", "__SESSION__", "idle", 11,
+                 '{"outcome": "' + idle_outcome + '"}'),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+_write_proof()
+'''
+
 
 def _script(tmp_path, behavior="success"):
-    """Create a fake OpenCode executable emitting pinned-contract JSONL streams."""
+    """Create a fake OpenCode executable emitting v2 JSONL streams + native proof."""
     trace = tmp_path / "trace.json"
     stream = _STREAMS.get(behavior, [])
+    proof_writer = _PROOF_WRITER.replace(
+        "__PROOF_MODE__", _PROOF_MODES.get(behavior, "none")
+    ).replace("__SESSION__", SESSION)
     body = f'''#!{sys.executable}
 import json, os, sys, time
 trace = {str(trace)!r}
 with open(trace, "w", encoding="utf-8") as handle:
     json.dump({{"argv": sys.argv[1:], "stdin": sys.stdin.read(),
                "pid": os.getpid(),
+               "cwd": os.getcwd(),
                "config": os.environ.get("OPENCODE_CONFIG_CONTENT", ""),
                "disable": os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG"),
                "env_home": os.environ.get("HOME", ""),
@@ -210,7 +291,7 @@ elif behavior == "timeout":
 else:
     for event in {stream!r}:
         print(json.dumps(event))
-'''
+{proof_writer}'''
     path = tmp_path / f"fake-opencode-{behavior}"
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -239,14 +320,25 @@ async def test_runner_uses_argv_stdin_isolated_env_and_final_text(tmp_path, monk
     assert "Checking the repository now." not in reply.text
     assert "Narrowing the answer down." not in reply.text
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    # Native v2: the repository Location is the subprocess cwd (--dir is gone)
+    # and every invocation runs --standalone so it never attaches to the
+    # shared background service.
     assert trace["argv"] == [
-        "run", "--format", "json", "--model", "provider/model",
-        "--agent", "oi", "--dir", str(repo.resolve()),
+        "run", "--standalone", "--format", "json", "--model", "provider/model",
+        "--agent", "oi",
     ]
+    assert trace["cwd"] == str(repo.resolve())
     assert "What changed?" in trace["stdin"]
     assert trace["disable"] == "1"
-    policy = json.loads(trace["config"])["agent"]["oi"]["permission"]
-    assert policy["*"] == "deny"
+    config = json.loads(trace["config"])
+    # The run-wide envelope stays fail-closed: global deny-all first, no
+    # automatic workspace mutation, and the oi agent's own rules deny too.
+    assert config["permissions"][0] == {"action": "*", "resource": "*", "effect": "deny"}
+    assert config["snapshot"] is False
+    assert config["formatter"] is False
+    agent = config["agents"]["oi"]
+    assert agent["mode"] == "primary"
+    assert agent["permissions"][0] == {"action": "*", "resource": "*", "effect": "deny"}
     assert "--auto" not in trace["argv"]
 
 
@@ -306,11 +398,16 @@ async def test_unframed_planning_is_never_delivered(tmp_path, monkeypatch):
     ("cli_missing_session", "unknown_session"),
     ("empty", "empty_response"),
     ("large_line", "json_line_limit"),
-    ("no_completion", "protocol_no_final_message"),
-    ("midloop_end", "protocol_no_final_message"),
-    ("ambiguous", "protocol_ambiguous_final"),
-    ("incomplete_reason", "protocol_incomplete_final"),
+    # Native v2 completion gate: the four bounded proof failures.
+    ("unproven", "native_state_unavailable"),
+    ("not_stopped", "native_answer_not_completed"),
+    ("no_idle", "native_session_unverifiable"),
+    ("idle_error", "native_run_failed"),
+    # A text part with no messageID is a protocol violation first: it can
+    # never be bound to native proof either way.
     ("missing_id", "protocol_missing_message_id"),
+    # Selector-level stream validation still fails closed under real proof.
+    ("ambiguous", "protocol_ambiguous_final"),
     ("conflicting_part", "protocol_conflicting_part"),
     ("unknown_event", "protocol_unknown_event"),
     ("error_after_text", "ProviderAuthError"),
@@ -409,9 +506,9 @@ async def test_run_raw_prompt_returns_only_final_message_text(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_run_raw_prompt_protocol_failure_returns_none(tmp_path, monkeypatch):
-    """A stream without a completed final message returns None like other failures."""
+    """A stream without provable native completion returns None like other failures."""
     monkeypatch.setenv("HOME", str(tmp_path / "operator"))
-    binary, _ = _script(tmp_path, "no_completion")
+    binary, _ = _script(tmp_path, "unproven")
     cfg = Config(
         opencode_binary=str(binary),
         opencode_model="provider/model",
@@ -421,9 +518,17 @@ async def test_run_raw_prompt_protocol_failure_returns_none(tmp_path, monkeypatc
     assert res is None
 
 
+def _select(events, *, completed=True, error_class=None, message_id=None):
+    """Run the v2 selector against a synthetic stream with a given proof."""
+    return _select_final_text_v2(
+        events,
+        NativeCompletion(completed=completed, error_class=error_class, message_id=message_id),
+    )
+
+
 def _arrives_first(events):
     """Selection result tuple for a synthetic event list."""
-    return _select_final_text(events)
+    return _select(events)
 
 
 def test_select_final_text_preserves_arrival_order_and_dedupes():
@@ -447,25 +552,26 @@ def test_select_final_text_fail_closed_classes():
     base = [_event("step_start", _part("step-start", "m1", "s1"))]
     cases = [
         (base + [{"type": "teleport", "timestamp": 1, "sessionID": SESSION}],
-         "protocol_unknown_event"),
+         "protocol_unknown_event", {}),
         (base + [{"type": "text", "timestamp": 1, "sessionID": SESSION, "part": "nope"}],
-         "protocol_malformed_part"),
+         "protocol_malformed_part", {}),
         (base + [{"type": "text", "timestamp": 1, "sessionID": SESSION,
                   "part": {"id": "x", "type": "text", "text": "orphan"}}],
-         "protocol_missing_message_id"),
+         "protocol_missing_message_id", {}),
         (base + [_event("text", _part("text", "m1", "a1", text="ONE")),
                  _event("text", _part("text", "m1", "a1", text="TWO"))],
-         "protocol_conflicting_part"),
+         "protocol_conflicting_part", {}),
         (base + [_event("step_finish", _part("step-finish", "m1", "f1"))],
-         "protocol_malformed_part"),
+         "protocol_malformed_part", {}),
+        # A v2-shaped lone text message with NO completion proof fails closed.
         ([_event("text", _part("text", "m1", "a1", text="UNFINISHED"))],
-         "protocol_no_final_message"),
+         "protocol_no_final_message", {"completed": False}),
         (base + [_event("step_finish", _part("step-finish", "m1", "f1",
                                              reason="content-filter"))],
-         "protocol_incomplete_final"),
+         "protocol_incomplete_final", {}),
     ]
-    for events, expected in cases:
-        text, _, error_class, _ = _select_final_text(events)
+    for events, expected, completion_kwargs in cases:
+        text, _, error_class, _ = _select(events, **completion_kwargs)
         assert text == ""
         assert error_class == expected
 
@@ -478,9 +584,8 @@ def test_select_final_text_synthetic_and_ignored_parts_are_not_answers():
                              synthetic=True)),
         _event("text", _part("text", "m1", "a2", text="queued echo",
                              ignored=True)),
-        _event("step_finish", _part("step-finish", "m1", "f1", reason="stop")),
     ]
-    text, _, error_class, text_parts = _select_final_text(events)
+    text, _, error_class, text_parts = _select(events, completed=False)
     assert text == ""
     assert error_class == "protocol_no_final_message"
     assert text_parts == 0
@@ -488,39 +593,40 @@ def test_select_final_text_synthetic_and_ignored_parts_are_not_answers():
 
 def test_select_final_text_rejects_text_after_finish_for_same_message():
     """Text streamed after a finish for the same messageID fails closed."""
-    events = _final_step("m1", [("a1", "FINAL")]) + [
+    events = _final_closed("m1", [("a1", "FINAL")]) + [
         _event("text", _part("text", "m1", "late", text="SMUGGLED_TEXT")),
     ]
-    text, _, error_class, _ = _select_final_text(events)
+    text, _, error_class, _ = _select(events)
     assert text == ""
     assert error_class == "protocol_malformed_part"
 
 
-def test_select_final_text_new_message_after_finish_is_not_malformed():
-    """A new messageID after a finish follows the normal superseded rules."""
+def test_select_final_text_trailing_unproven_message_fails_closed():
+    """A trailing message the completion proof never confirmed is ambiguous."""
+    # A second full message after the proven final answer (proof binds m1).
     superseded = _final_step("m1", [("a1", "FIRST_FINAL")]) + _final_step(
         "m2", [("a2", "SECOND_FINAL")]
     )
-    text, _, error_class, _ = _select_final_text(superseded)
+    text, _, error_class, _ = _select(superseded, message_id="m1")
     assert text == ""
     assert error_class == "protocol_ambiguous_final"
 
-    # A follow-on message that never completes does not disturb the
-    # already-completed final answer.
+    # Even a bare trailing step_start (a message native never finished) makes
+    # the run ambiguous: the stream contradicts the proven terminal state.
     follow_on = _final_step("m1", [("a1", "FINAL")]) + [
         _event("step_start", _part("step-start", "m2", "s2")),
         _event("text", _part("text", "m2", "a2", text="UNFINISHED_TAIL")),
     ]
-    text, _, error_class, text_parts = _select_final_text(follow_on)
-    assert text == "FINAL"
-    assert error_class is None
-    assert text_parts == 2
+    text, _, error_class, text_parts = _select(follow_on, message_id="m1")
+    assert text == ""
+    assert error_class == "protocol_ambiguous_final"
+    assert text_parts == 0
 
 
 def test_select_final_text_in_stream_error_takes_precedence():
     """A stream error class is surfaced so the caller refuses any final text."""
     events = _final_step("m1", [("a1", "FINAL")]) + [_ERROR_EVENT]
-    _, _, error_class, _ = _select_final_text(events)
+    _, _, error_class, _ = _select(events)
     assert error_class == "ProviderAuthError"
 
 
@@ -541,7 +647,7 @@ def test_error_class_repro_leaking_dict_name_collapses():
     assert _error_class(_LEAK_NAME_ERROR_EVENT) == "opencode_error"
     # In-stream precedence still holds: the leaked name cannot ride along
     # with a completed final answer.
-    text, _, error_class, _ = _select_final_text(
+    text, _, error_class, _ = _select(
         _final_step("m1", [("a1", "FINAL")]) + [_LEAK_NAME_ERROR_EVENT]
     )
     assert error_class == "opencode_error"
@@ -728,8 +834,13 @@ async def test_run_raw_prompt_uses_eval_agent_with_denied_permissions(tmp_path, 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     assert "--agent" in trace["argv"]
     assert "oi_eval" in trace["argv"]
-    policy = json.loads(trace["config"])["agent"]["oi_eval"]["permission"]
-    assert policy["*"] == "deny"
+    config = json.loads(trace["config"])
+    # Hidden maintenance agents are constrained by the run-wide deny-all too.
+    assert config["permissions"] == [{"action": "*", "resource": "*", "effect": "deny"}]
+    assert config["snapshot"] is False
+    assert config["formatter"] is False
+    agent = config["agents"]["oi_eval"]
+    assert agent["permissions"] == [{"action": "*", "resource": "*", "effect": "deny"}]
 
 
 def _isolated_roots(operator_home: Path):
@@ -758,11 +869,14 @@ async def test_run_raw_prompt_subprocess_isolation(tmp_path, monkeypatch):
     assert Path(trace["xdg_config"]) == iso_config
     assert Path(trace["xdg_data"]) == iso_data
     assert trace["disable"] == "1"
-    # The eval agent has no repository binding at all.
+    # The eval agent has no repository binding at all: no --dir flag exists in
+    # native v2 and the subprocess cwd is the isolated home, not a repository.
     assert "--dir" not in trace["argv"]
-    agent_def = json.loads(trace["config"])["agent"]["oi_eval"]
-    assert agent_def["permission"] == {"*": "deny"}
-    assert agent_def["steps"] == 1
+    assert Path(trace["cwd"]) == iso_home
+    config = json.loads(trace["config"])
+    agent = config["agents"]["oi_eval"]
+    assert agent["permissions"] == [{"action": "*", "resource": "*", "effect": "deny"}]
+    assert agent["steps"] == 1
 
 
 @pytest.mark.asyncio
@@ -922,6 +1036,22 @@ def _reviews_glob() -> list[Path]:
     return list(reviews.glob("oi-review-*"))
 
 
+def _snapshot_dirs(trace: dict) -> tuple[Path, Path]:
+    """Resolve (head, base) snapshot directories from the fake native trace.
+
+    Native v2 sets the review Location through the subprocess working
+    directory, and the base snapshot is only ever named in the prompt's
+    BASE DIRECTORY line (never as a flag).
+    """
+    head_dir = Path(trace["cwd"])
+    base_dir = None
+    for line in trace["stdin"].splitlines():
+        if line.startswith("BASE DIRECTORY"):
+            base_dir = Path(line.split(":", 1)[1].strip())
+    assert base_dir is not None, "review prompt must name the base snapshot"
+    return head_dir, base_dir
+
+
 @pytest.mark.asyncio
 async def test_runner_mr_review_audits_snapshots_with_mr_provenance(tmp_path, monkeypatch):
     """An explicit MR reference audits controller snapshots, never the checkout."""
@@ -947,19 +1077,14 @@ async def test_runner_mr_review_audits_snapshots_with_mr_provenance(tmp_path, mo
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     argv = trace["argv"]
     assert "--session" not in argv
-    head_dir = Path(argv[argv.index("--dir") + 1])
+    assert "--dir" not in argv  # native v2 removed --dir; Location is the cwd
+    head_dir, base_dir = _snapshot_dirs(trace)
     assert head_dir != clone.resolve()  # a fresh snapshot dir, NOT the watched repo
     assert head_dir.name == "head"      # head snapshot is the primary workspace
-    base_dir = head_dir.parent / "base"
-    policy = json.loads(trace["config"])["agent"]["oi"]["permission"]
-    assert policy["*"] == "deny"
-    assert policy["bash"] == "deny"
-    assert policy["edit"] == "deny"
-    assert policy["webfetch"] == "deny"
-    ext = policy["external_directory"]
-    assert ext["*"] == "deny"
-    assert ext[str(base_dir)] == "allow"
-    assert ext[f"{base_dir}/**"] == "allow"
+    config = json.loads(trace["config"])
+    agent = config["agents"]["oi"]
+    assert config["permissions"][0] == {"action": "*", "resource": "*", "effect": "deny"}
+    assert agent["permissions"][0] == {"action": "*", "resource": "*", "effect": "deny"}
     stdin = trace["stdin"]
     assert reply.text == "UNIQUE_MARKER"
     assert base_sha in stdin and head_sha in stdin
@@ -1145,17 +1270,18 @@ def _bare_with_defect(
 
 
 def _reading_script(tmp_path: Path, filename: str) -> Path:
-    """Fake OpenCode that reads filename from its --dir and the prompt-authorized base dir.
+    """Fake OpenCode that reads filename from its cwd and the prompt-authorized base dir.
 
     Proves real read access to both controller snapshots: the head file comes
-    from the primary ``--dir`` workspace and the base file from the auxiliary
-    root exactly as named in the prompt's BASE DIRECTORY line. The final
-    message carries both file contents so the test can see the defect only
-    where it exists.
+    from the primary workspace (the subprocess cwd, native v2 style) and the
+    base file from the auxiliary root exactly as named in the prompt's BASE
+    DIRECTORY line. The final message carries both file contents so the test
+    can see the defect only where it exists. Completion is proven through the
+    native database like every other v2 run.
     """
     body = f'''#!{sys.executable}
-import json, sys
-head_dir = sys.argv[sys.argv.index("--dir") + 1]
+import json, os, sqlite3, sys
+head_dir = os.getcwd()
 stdin = sys.stdin.read()
 base_dir = ""
 for line in stdin.splitlines():
@@ -1171,16 +1297,40 @@ try:
         base_value = handle.read().strip()
 except OSError:
     base_value = "MISSING"
-final = {{"id": "rf", "messageID": "msg_final", "sessionID": "session-123",
-        "type": "text", "text": "[[OI_FINAL_ANSWER]]\\nHEAD_VALUE=" + head_value + " BASE_VALUE=" + base_value}}
-print(json.dumps({{"type": "step_start", "timestamp": 0, "sessionID": "session-123",
-                  "part": {{"id": "rs", "messageID": "msg_final",
-                           "sessionID": "session-123", "type": "step-start"}}}}))
-print(json.dumps({{"type": "text", "timestamp": 0, "sessionID": "session-123", "part": final}}))
-print(json.dumps({{"type": "step_finish", "timestamp": 0, "sessionID": "session-123",
-                  "part": {{"id": "rfin", "messageID": "msg_final",
-                           "sessionID": "session-123", "type": "step-finish",
-                           "reason": "stop"}}}}))
+session = "session-123"
+message = "msg_final"
+text = "[[OI_FINAL_ANSWER]]\\nHEAD_VALUE=" + head_value + " BASE_VALUE=" + base_value
+print(json.dumps({{"type": "step_start", "timestamp": 0, "sessionID": session,
+                  "part": {{"id": "rs", "messageID": message,
+                           "sessionID": session, "type": "step-start"}}}}))
+print(json.dumps({{"type": "text", "timestamp": 0, "sessionID": session,
+                  "part": {{"id": "rf", "messageID": message, "sessionID": session,
+                           "type": "text", "text": text,
+                           "time": {{"start": 0, "end": 1}}}}}}))
+data_home = os.environ.get("XDG_DATA_HOME")
+if data_home:
+    db_path = os.path.join(data_home, "opencode", "opencode.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS session_message "
+            "(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            (message, session, "assistant", 10,
+             '{{"finish": "stop", "time": {{"completed": 123}}}}'),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            (message + "-idle", session, "idle", 11, '{{"outcome": "succeeded"}}'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 '''
     path = tmp_path / "fake-opencode-reader"
     path.write_text(body, encoding="utf-8")
@@ -1212,6 +1362,17 @@ async def test_runner_mr_review_reads_defect_from_head_and_base_snapshots(
     assert worktree_fingerprint(clone) == fingerprint
 
 
+def _effective(rules: list[dict[str, str]], action: str, resource: str) -> str:
+    """Apply native v2 last-matching-rule-wins semantics to one request."""
+    outcome = "deny"
+    for rule in rules:
+        if rule["action"] not in (action, "*"):
+            continue
+        if fnmatch.fnmatchcase(resource, rule["resource"]) or rule["resource"] == "*":
+            outcome = rule["effect"]
+    return outcome
+
+
 @pytest.mark.asyncio
 async def test_runner_mr_review_permission_matrix_is_read_only(tmp_path, monkeypatch):
     """The generated review policy denies everything except scoped read tools."""
@@ -1226,29 +1387,37 @@ async def test_runner_mr_review_permission_matrix_is_read_only(tmp_path, monkeyp
     assert reply.ok is True
 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
-    policy = json.loads(trace["config"])["agent"]["oi"]["permission"]
-    head_dir = Path(trace["argv"][trace["argv"].index("--dir") + 1])
-    base_dir = head_dir.parent / "base"
+    rules = json.loads(trace["config"])["agents"]["oi"]["permissions"]
+    head_dir, base_dir = _snapshot_dirs(trace)
 
-    assert policy["*"] == "deny"
-    for tool in ("bash", "webfetch", "websearch", "edit", "write", "patch",
-                 "task", "skill", "question", "mcp", "grep", "todolist"):
-        assert policy[tool] == "deny", tool
-    assert policy["lsp"] == "allow"
-    secret_patterns = (".git/**", ".env", "**/.env", "**/*secret*", "**/*.pem")
-    for tool in ("read", "glob", "list"):
-        rules = policy[tool]
-        assert rules["*"] == "allow"
-        for pattern in secret_patterns:
-            assert rules[pattern] == "deny"                      # workspace (head) root
-            assert rules[f"{base_dir}/{pattern}"] == "deny"      # base snapshot root
-    ext = policy["external_directory"]
-    assert isinstance(ext, dict)
-    # ONLY the base snapshot directory (plus its subtree) is externally authorized.
-    assert set(ext) == {"*", str(base_dir), f"{base_dir}/**"}
-    assert ext["*"] == "deny"
-    assert ext[str(base_dir)] == "allow"
-    assert ext[f"{base_dir}/**"] == "allow"
+    # Ordered fail-closed deny first (overrides the native allow-by-default
+    # base policy), then only narrow re-grants.
+    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
+    # v2 action names only: bash/task/lsp/mcp/todolist are not v2 actions and
+    # must never be granted authority they would not carry.
+    for action in ("shell", "subagent", "skill", "question", "webfetch",
+                   "websearch", "execute", "edit", "bash", "task", "lsp",
+                   "mcp", "grep", "list", "todolist", "write", "patch"):
+        assert not any(
+            rule["action"] == action and rule["effect"] == "allow"
+            for rule in rules
+        ), action
+        assert _effective(rules, action, "anything") == "deny", action
+    # Scoped repository reads survive; secrets and nested git never do.
+    assert _effective(rules, "read", f"{head_dir}/src/main.py") == "allow"
+    assert _effective(rules, "glob", f"{head_dir}/docs/*.md") == "allow"
+    for root in (head_dir, base_dir):
+        for pattern in (".env", "sub/.git/config", "server.pem",
+                        "ops/token-cache.json", "secrets.json"):
+            assert _effective(rules, "read", f"{root}/{pattern}") == "deny", (
+                root, pattern
+            )
+    # ONLY the base snapshot directory (plus its subtree) is externally
+    # authorized; every other external path stays denied.
+    assert _effective(rules, "external_directory", f"{base_dir}/code.py") == "allow"
+    assert _effective(rules, "external_directory", f"{base_dir}/.env") == "deny"
+    assert _effective(rules, "external_directory", "/elsewhere/code.py") == "deny"
+    assert _effective(rules, "read", f"{base_dir}/code.py") == "allow"
 
 
 @pytest.mark.asyncio

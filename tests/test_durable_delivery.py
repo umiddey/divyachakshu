@@ -1055,17 +1055,39 @@ def _spam_opencode_script(
         if final_index == 0:
             final_text = f"{FINAL_OUTPUT_MARKER}\n{final_text}"
         part = {"id": f"p{part_index}", "messageID": message,
-                "sessionID": session, "type": "text", "text": final_text}
+                "sessionID": session, "type": "text", "text": final_text,
+                "time": {"start": 0, "end": 1}}
         stream.append({"type": "text", "timestamp": 0, "sessionID": session, "part": part})
         part_index += 1
-    part = {"id": f"p{part_index}", "messageID": message,
-            "sessionID": session, "type": "step-finish", "reason": "stop"}
-    stream.append({"type": "step_finish", "timestamp": 0, "sessionID": session, "part": part})
 
     body = f"""#!{sys.executable}
-import json, sys
+import json, os, sqlite3, sys
 for event in {stream!r}:
     print(json.dumps(event))
+data_home = os.environ.get("XDG_DATA_HOME")
+if data_home:
+    db_path = os.path.join(data_home, "opencode", "opencode.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS session_message "
+            "(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg_final", {session!r}, "assistant", 10,
+             '{{"finish": "stop", "time": {{"completed": 123}}}}'),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg_final-idle", {session!r}, "idle", 11, '{{"outcome": "succeeded"}}'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 """
     path = tmp_path / "fake-opencode-spam"
     path.write_text(body, encoding="utf-8")
@@ -1135,6 +1157,9 @@ def _outbox_rows(store: Store) -> list[tuple[str, int, str | None]]:
 async def test_final_only_reply_reaches_outbox_and_discord(tmp_path: Path, monkeypatch) -> None:
     """Narration from a multi-step stream never reaches the outbox or Discord."""
     monkeypatch.setattr(discord_client, "BURST_QUIET_SECONDS", 0)
+    # Isolate the native root so the fake proof database never touches
+    # shared OpenCode storage.
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
     repo = _committed_repo(tmp_path)
     narration = ["Let me check the repository now.", "Narrowing the answer down."]
     final_body = "VERIFIED_FINAL_BEGIN " + ("A verified conclusion sentence. " * 90) + "FINAL_ANSWER_END"

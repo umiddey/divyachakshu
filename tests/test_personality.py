@@ -136,7 +136,7 @@ def _fake_opencode(tmp_path: Path, name: str = "fake-opencode") -> tuple[Path, P
     """Fake OpenCode binary recording argv/stdin/inline config, then answering."""
     trace = tmp_path / f"{name}-trace.json"
     body = f'''#!{sys.executable}
-import json, os, sys
+import json, os, sqlite3, sys
 trace = {str(trace)!r}
 with open(trace, "w", encoding="utf-8") as handle:
     json.dump({{"argv": sys.argv[1:], "stdin": sys.stdin.read(),
@@ -145,15 +145,36 @@ with open(trace, "w", encoding="utf-8") as handle:
                "xdg_config": os.environ.get("XDG_CONFIG_HOME", ""),
                "disable": os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG")}}, handle)
 part = {{"id": "p2", "messageID": "msg-1", "sessionID": "session-123",
-        "type": "text", "text": "[[OI_FINAL_ANSWER]]\\nUNIQUE_MARKER"}}
+        "type": "text", "text": "[[OI_FINAL_ANSWER]]\\nUNIQUE_MARKER",
+        "time": {{"start": 0, "end": 1}}}}
 print(json.dumps({{"type": "step_start", "timestamp": 0, "sessionID": "session-123",
                   "part": {{"id": "p1", "messageID": "msg-1",
                            "sessionID": "session-123", "type": "step-start"}}}}))
 print(json.dumps({{"type": "text", "timestamp": 0, "sessionID": "session-123", "part": part}}))
-print(json.dumps({{"type": "step_finish", "timestamp": 0, "sessionID": "session-123",
-                  "part": {{"id": "p3", "messageID": "msg-1",
-                           "sessionID": "session-123", "type": "step-finish",
-                           "reason": "stop"}}}}))
+data_home = os.environ.get("XDG_DATA_HOME")
+if data_home:
+    db_path = os.path.join(data_home, "opencode", "opencode.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS session_message "
+            "(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg-1", "session-123", "assistant", 10,
+             '{{"finish": "stop", "time": {{"completed": 123}}}}'),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO session_message "
+            "(id, session_id, type, seq, data) VALUES (?,?,?,?,?)",
+            ("msg-1-idle", "session-123", "idle", 11, '{{"outcome": "succeeded"}}'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 '''
     path = tmp_path / name
     path.write_text(body, encoding="utf-8")
@@ -163,7 +184,7 @@ print(json.dumps({{"type": "step_finish", "timestamp": 0, "sessionID": "session-
 
 def _prompt_from_trace(trace_path: Path) -> str:
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
-    return json.loads(trace["config"])["agent"]["oi"]["prompt"]
+    return json.loads(trace["config"])["agents"]["oi"]["system"]
 
 
 # --- personality baseline ----------------------------------------------------------

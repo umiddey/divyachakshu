@@ -5,7 +5,13 @@ import shutil
 import pytest
 from typer.testing import CliRunner
 
-from oi_agent.config import Config, WatchTarget, load_config, save_config
+from oi_agent.config import (
+    Config,
+    WatchTarget,
+    load_config,
+    save_config,
+    validate_config,
+)
 
 
 def _binary() -> str:
@@ -239,3 +245,105 @@ def test_session_limits_reject_invalid_values_without_replacing_config(tmp_path,
     )
     with pytest.raises(ValueError, match=field):
         load_config(path)
+
+
+# --- controller-owned external inputs (plan corrections 8 + 12) -----------------
+
+def test_external_inputs_defaults_are_conservative():
+    """Disabled retrieval and image inputs are the honest shipped defaults."""
+    cfg = Config()
+    assert cfg.external_inputs == "disabled"
+    assert cfg.image_inputs == "off"
+    assert cfg.max_external_evidence_items == 8
+    assert cfg.max_attachments == 4
+    assert cfg.max_attachment_bytes == 8 * 1024 * 1024
+
+
+def test_external_inputs_roundtrip_and_validate(tmp_path):
+    """Operator-enabled external inputs survive a validated round-trip."""
+    cfg = _valid_config()
+    cfg.external_inputs = "read-only"
+    cfg.image_inputs = "on"
+    cfg.max_external_evidence_items = 12
+    cfg.max_attachments = 6
+    cfg.max_attachment_bytes = 4 * 1024 * 1024
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    back = load_config(path)
+    assert back.external_inputs == "read-only"
+    assert back.image_inputs == "on"
+    assert back.max_external_evidence_items == 12
+    assert back.max_attachments == 6
+    assert back.max_attachment_bytes == 4 * 1024 * 1024
+    # Validation is silent on the valid combination.
+    validate_config(back)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("external_inputs", "full"),
+    ("external_inputs", "write"),
+    ("image_inputs", "auto"),
+    ("image_inputs", "true"),
+    ("max_external_evidence_items", 0),
+    ("max_external_evidence_items", 51),
+    ("max_attachments", -1),
+    ("max_attachments", 17),
+    ("max_attachment_bytes", 1023),
+    ("max_attachment_bytes", 33 * 1024 * 1024),
+])
+def test_external_inputs_invalid_values_fail_closed(tmp_path, field, value):
+    """Unknown modes and out-of-bounds caps are rejected with the repair path."""
+    import json as _json
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'{field} = {_json.dumps(value)}\n'
+        f'opencode_binary = "{_binary()}"\n'
+        '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=field):
+        load_config(path)
+    # The same rejection protects an in-memory save (atomic write stays put).
+    cfg = _valid_config()
+    save_config(cfg, path)
+    before = path.read_bytes()
+    setattr(cfg, field, value)
+    with pytest.raises(ValueError, match=field):
+        save_config(cfg, path)
+    assert path.read_bytes() == before
+
+
+def test_external_inputs_cli_set_show_roundtrip(tmp_path):
+    """oi config set edits the external knobs; show displays them; junk fails."""
+    from oi_agent.cli import app
+
+    runner = CliRunner()
+    path = tmp_path / "config.toml"
+    save_config(_valid_config(), path)
+
+    for key, value in (
+        ("external_inputs", "read-only"),
+        ("image_inputs", "on"),
+        ("max_attachments", "6"),
+        ("max_attachment_bytes", "1048576"),
+        ("max_external_evidence_items", "12"),
+    ):
+        result = runner.invoke(
+            app, ["config", "set", key, value, "--config", str(path)]
+        )
+        assert result.exit_code == 0, result.output
+
+    shown = runner.invoke(app, ["config", "show", "--config", str(path)])
+    assert shown.exit_code == 0, shown.output
+    assert "external_inputs = read-only" in shown.output
+    assert "image_inputs = on" in shown.output
+    assert "max_attachments = 6" in shown.output
+    assert "max_attachment_bytes = 1048576" in shown.output
+    assert "max_external_evidence_items = 12" in shown.output
+
+    bad = runner.invoke(
+        app, ["config", "set", "image_inputs", "auto", "--config", str(path)]
+    )
+    assert bad.exit_code == 1
+    assert load_config(path).image_inputs == "on"
