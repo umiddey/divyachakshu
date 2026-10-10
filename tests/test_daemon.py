@@ -202,10 +202,11 @@ def _doctor_v2_config(tmp_path):
 
 
 def _patch_doctor_opencode(monkeypatch, tmp_path):
-    """Pin doctor to an isolated root with proven v2.0.5 probe shapes.
+    """Pin doctor to an isolated root with the proven v2.0.5 probe shapes.
 
-    `auth list --standalone` prints "No authenticated integrations" and
-    `models --standalone` exits 0 with empty output on a working install.
+    `models --standalone` exits 0 with empty output on a working install;
+    the auth boolean comes from the credential store, so tests seed rows
+    with the seed_credential_db fixture instead of faking any auth probe.
     """
     from types import SimpleNamespace
 
@@ -219,12 +220,12 @@ def _patch_doctor_opencode(monkeypatch, tmp_path):
         lambda *args, **kwargs: resolve_opencode_paths(tmp_path),
     )
 
-    def fake_run(cmd, **kwargs):
-        if "auth" in cmd:
-            return SimpleNamespace(returncode=0, stdout="No authenticated integrations\n")
-        return SimpleNamespace(returncode=0, stdout="")
-
-    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    # authenticated() reads the credential store directly; only `models`
+    # still shells out, so that is the only probe to fake.
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run",
+        lambda cmd, **kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
     return resolve_opencode_paths(tmp_path)
 
 

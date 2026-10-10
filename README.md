@@ -179,12 +179,13 @@ only the configured Discord token environment variable and is mode `0600`.
 How OI checks OpenCode (doctor, init): every bootstrap subcommand runs with
 `--standalone` and a bounded timeout, so it never connects to a shared
 `opencode serve --service` on the managed port. Authentication is read from
-the isolated credential store (active rows only); the model id itself is
-checked against `opencode models`. That listing can legitimately be empty —
-in that case a credentialed provider is reported as `model <id> not verified
-against OpenCode's model list; provider credential present` (a warning, not a
-failure), and `oi init` without `--model` asks for an explicit model instead
-of guessing.
+the isolated credential store, counting rows not explicitly deactivated
+(`active != 0`; the native runtime inserts rows without the flag and does not
+filter on it). The model id itself is checked against `opencode models`. That
+listing can legitimately be empty — in that case a credentialed provider is
+reported as `model <id> not verified against OpenCode's model list; provider
+credential present` (a warning, not a failure), and `oi init` without
+`--model` asks for an explicit model instead of guessing.
 
 ## Config sketch
 

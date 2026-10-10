@@ -1,6 +1,7 @@
 """CLI tests for the OpenCode contract and retained controls."""
 
 import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -161,8 +162,7 @@ def test_init_without_model_and_empty_listing_requires_model(tmp_path, monkeypat
     from oi_agent.opencode.bootstrap import OpenCodeBootstrapError
 
     _patch_ensure_installed(tmp_path, monkeypatch)
-    # raising=False: committed code resolves list_models via cli's own import.
-    monkeypatch.setattr("oi_agent.cli.list_models", lambda *a, **k: [], raising=False)
+    monkeypatch.setattr("oi_agent.cli.list_models", lambda *a, **k: [])
     monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", lambda *a, **k: [])
     with pytest.raises(OpenCodeBootstrapError, match="--model"):
         cli._ensure_opencode(None, True)
@@ -174,7 +174,7 @@ def test_init_without_model_names_credentialed_providers(tmp_path, monkeypatch, 
     from oi_agent.opencode.paths import resolve_opencode_paths
 
     _patch_ensure_installed(tmp_path, monkeypatch)
-    monkeypatch.setattr("oi_agent.cli.list_models", lambda *a, **k: [], raising=False)
+    monkeypatch.setattr("oi_agent.cli.list_models", lambda *a, **k: [])
     monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", lambda *a, **k: [])
     seed_credential_db(resolve_opencode_paths(tmp_path).data_home, "zai-coding-plan")
     with pytest.raises(OpenCodeBootstrapError, match="zai-coding-plan"):
@@ -217,11 +217,64 @@ def test_init_probe_failure_exits_cleanly_without_traceback(tmp_path, monkeypatc
         )
 
     monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", wedged)
-    monkeypatch.setattr("oi_agent.cli.list_models", wedged, raising=False)
+    monkeypatch.setattr("oi_agent.cli.list_models", wedged)
     result = runner.invoke(app, ["init", "--model", "zai-coding-plan/glm-5.3-flash", "--yes"])
     assert result.exit_code == 1, result.output
     assert "did not finish" in result.output
     assert not isinstance(result.exception, OpenCodeBootstrapError)
+
+
+def test_init_login_timeout_exits_cleanly_without_traceback(tmp_path, monkeypatch):
+    """A wedged interactive login surfaces as a red message and exit 1.
+
+    authenticate() must convert the subprocess timeout into a bootstrap
+    error; a raw TimeoutExpired escaping into typer prints a traceback.
+    """
+    from oi_agent.opencode import bootstrap as bootstrap_module
+
+    _patch_ensure_installed(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "authenticated", lambda *args: False)
+
+    def wedged_login(cmd, **kwargs):
+        if "auth" in cmd:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(bootstrap_module.subprocess, "run", wedged_login)
+    result = runner.invoke(app, ["init", "--model", "zai-coding-plan/glm-5.3-flash", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "did not complete" in result.output
+    assert not isinstance(result.exception, subprocess.TimeoutExpired)
+
+
+def test_doctor_with_warnings_never_prints_all_checks_passed(
+        tmp_path, monkeypatch, seed_credential_db):
+    """A warning verdict must not read as 'all checks passed'.
+
+    The live config runs zai-coding-plan whose v2 listing is empty, so the
+    honest verdict is 'passed with N warning(s)' (exit code stays 0).
+    """
+    cfg_path, _repo = _watch_config(tmp_path)
+    store_path = tmp_path / "state.db"
+    runner.invoke(app, ["config", "set", "db_path", str(store_path), "--config", str(cfg_path)])
+    runner.invoke(app, [
+        "config", "set", "opencode_model", "zai-coding-plan/glm-5.3-flash",
+        "--config", str(cfg_path),
+    ])
+    from oi_agent.opencode.paths import resolve_opencode_paths
+
+    version_mock = SimpleNamespace(binary="/bin/true", version=(2, 0, 5), raw="2.0.5")
+    monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
+    monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
+    monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", lambda *args: [])
+    seed_credential_db(resolve_opencode_paths(tmp_path).data_home, "zai-coding-plan")
+    monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = runner.invoke(app, ["doctor", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert "all checks passed" not in result.output
+    assert "passed with 1 warning" in result.output
 
 
 def test_queue_status_command(tmp_path):

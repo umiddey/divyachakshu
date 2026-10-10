@@ -196,14 +196,15 @@ def _run(binary: str, args: list[str], paths: OpenCodePaths,
 
 
 def credential_integrations(paths: OpenCodePaths) -> frozenset[str]:
-    """Return integration IDs not explicitly deactivated, read-only.
+    """Return integration IDs from rows not explicitly deactivated, read-only.
 
     Reuses the read pattern of native.copy_isolated_credentials: the isolated
     native database is opened read-only and only the ``integration_id``
-    column is selected, so no credential value ever enters OI memory. A row
-    counts unless it is EXPLICITLY deactivated (``active = 0``): the real
-    OI-isolated store carries ``active = NULL`` rows that provably
-    authenticate live runs, while a ``0`` row is a deliberate deactivation.
+    column is selected, so no credential value ever enters OI memory. The
+    ``active != 0`` exclusion is a CONSERVATIVE, fail-closed choice: v2.0.5
+    itself inserts credential rows without ``active`` (NULL) and its
+    credential lookup does not filter on the flag at all, so excluding an
+    explicit ``0`` can only cause a false FAIL here — never a false pass.
     """
     database = paths.data_home / NATIVE_DB_RELATIVE
     if not database.is_file():
@@ -240,8 +241,18 @@ def authenticated(paths: OpenCodePaths) -> bool:
 
 def authenticate(binary: str, paths: OpenCodePaths) -> None:
     """Hand an interactive terminal to OpenCode authentication."""
-    completed = _run(binary, ["auth", "login"], paths,
-                     inherit_stdio=True, timeout=LOGIN_TIMEOUT_SECONDS)
+    try:
+        completed = _run(binary, ["auth", "login"], paths,
+                         inherit_stdio=True, timeout=LOGIN_TIMEOUT_SECONDS)
+    except subprocess.SubprocessError as exc:
+        raise OpenCodeBootstrapError(
+            f"OpenCode authentication did not complete within "
+            f"{LOGIN_TIMEOUT_SECONDS:g}s; rerun `opencode auth login --standalone`"
+        ) from exc
+    except OSError as exc:
+        raise OpenCodeBootstrapError(
+            "OpenCode authentication could not start; verify the OpenCode install"
+        ) from exc
     if completed.returncode != 0 or not authenticated(paths):
         raise OpenCodeBootstrapError(
             "OpenCode authentication was not completed; rerun "
@@ -294,6 +305,18 @@ def model_status(binary: str, paths: OpenCodePaths, model: str) -> ModelStatus:
     probe falls back to the credential store for the model's provider prefix
     and returns the distinct unverified-availability state documented on
     ModelStatus.
+
+    What `models` filters on (read-only probe, 2026-10-10, v2.0.5): its help
+    says only "List all available models" with no filter flags. In the
+    operator's normal HOME it prints a large catalog (541 ids) spanning many
+    providers — including ones with NO stored credential (openrouter,
+    nvidia) — so the listing is catalog-driven and NOT credential-filtered.
+    The same command in OI's isolated environment exits 0 with EMPTY output
+    whether or not credentials exist. Two consequences: the empty listing
+    carries no auth or availability signal (hence the fallback), and the
+    non-empty path deliberately does NOT require a provider credential —
+    requiring one would false-fail models reachable via environment-provided
+    keys that never touch the credential store.
     """
     models = list_models(binary, paths)
     if models:

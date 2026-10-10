@@ -127,13 +127,15 @@ def _ensure_opencode(requested_model: str | None, consent: bool) -> str:
 
     if requested_model:
         status = model_status(version.binary, paths, requested_model)
-        if not status.available:
-            console.print(f"[yellow]warning: model {requested_model} not in detected models[/yellow]")
-        elif not status.verified:
+        if not status.verified:
+            credential_state = "present" if status.available else "absent"
             console.print(
-                f"[yellow]note: model {requested_model} not verified against "
-                "OpenCode's model list; provider credential present[/yellow]"
+                f"[yellow]warning: model {requested_model} not verified against "
+                "OpenCode's model list; provider credential "
+                f"{credential_state}[/yellow]"
             )
+        elif not status.available:
+            console.print(f"[yellow]warning: model {requested_model} not in detected models[/yellow]")
         return requested_model
 
     models = list_models(version.binary, paths)
@@ -797,6 +799,11 @@ def doctor(
         for f in failures:
             console.print(f"  [red]FAIL[/red] {f}")
         raise typer.Exit(1)
+    if warnings:
+        # Warnings are not passes: never print "all checks passed" when the
+        # model id could not be verified. Exit code stays 0.
+        console.print(f"[yellow]passed with {len(warnings)} warning(s)[/yellow]")
+        return
     console.print("[bold green]all checks passed[/bold green]")
 
 
