@@ -2,39 +2,13 @@
 
 import sqlite3
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from oi_agent.opencode import bootstrap
 from oi_agent.opencode.paths import resolve_opencode_paths
-
-
-def _seed_credential_db(data_home, integration_id):
-    """Create an isolated native store holding one provider credential row.
-
-    Mirrors the real credential table shape (native.CREDENTIAL_COLUMNS) without
-    touching any real secret material.
-    """
-    db = data_home / "opencode" / "opencode.db"
-    db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db)
-    try:
-        conn.execute(
-            "CREATE TABLE credential ("
-            "id TEXT PRIMARY KEY, integration_id TEXT, label TEXT, value TEXT, "
-            "connector_id TEXT, method_id TEXT, active INTEGER, "
-            "time_created INTEGER, time_updated INTEGER)"
-        )
-        conn.execute(
-            "INSERT INTO credential (id, integration_id, label, value, active) "
-            "VALUES (?, ?, 'API key', 'test-fixture-not-a-secret', 1)",
-            (f"cred_test_{integration_id}", integration_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return db
 
 
 def test_installed_binary_version_is_verified():
@@ -102,7 +76,7 @@ def test_model_listing_returns_exact_ids_without_raw_output(monkeypatch):
 
 
 def test_auth_check_reflects_credential_store_not_integration_listing(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, seed_credential_db):
     """The auth boolean comes from the isolated credential store.
 
     v2 `auth list` reports INTEGRATIONS, not provider credentials: on a
@@ -133,7 +107,7 @@ def test_auth_check_reflects_credential_store_not_integration_listing(
     )
 
     assert bootstrap.authenticated(paths) is False
-    _seed_credential_db(paths.data_home, "zai-coding-plan")
+    seed_credential_db(paths.data_home, "zai-coding-plan")
     assert bootstrap.authenticated(paths) is True
 
     assert connections, "credential probe must read the isolated native store"
@@ -141,28 +115,109 @@ def test_auth_check_reflects_credential_store_not_integration_listing(
     assert any("mode=ro" in target for target, _kwargs in connections)
 
 
-def test_model_availability_survives_empty_v2_listing(tmp_path, monkeypatch):
-    """Empty `models` output must not false-fail a credentialed model.
+def test_inactive_credential_rows_are_not_authenticated(tmp_path, seed_credential_db):
+    """Explicitly deactivated rows (active = 0) never pass.
 
-    `models --standalone` on 2.0.5 exits 0 with EMPTY output while a run
-    against a credentialed provider succeeds, so a non-empty listing is
-    trusted as authoritative and the empty listing falls back to the
-    credential store for the model's provider prefix.
+    A zero row is a deliberate deactivation, so an inactive-only store must
+    not read as authenticated — otherwise doctor passes and the following
+    run cannot use that credential.
     """
     paths = resolve_opencode_paths(tmp_path)
+    seed_credential_db(paths.data_home, "zai-coding-plan", active=0)
+    assert bootstrap.authenticated(paths) is False
+
+
+def test_null_active_credential_rows_authenticate(tmp_path, seed_credential_db):
+    """Untouched rows (active IS NULL) authenticate.
+
+    The real OI-isolated store carries `active = NULL` rows that provably
+    authenticate live runs, so NULL must not be mistaken for deactivated;
+    only an explicit 0 excludes a row.
+    """
+    paths = resolve_opencode_paths(tmp_path)
+    seed_credential_db(paths.data_home, "zai-coding-plan", active=None)
+    assert bootstrap.authenticated(paths) is True
+
+
+def test_mixed_active_and_inactive_credentials_authenticate(
+        tmp_path, seed_credential_db):
+    """One live row is enough even when other rows are deactivated."""
+    paths = resolve_opencode_paths(tmp_path)
+    seed_credential_db(paths.data_home, "zai-coding-plan", active=0)
+    seed_credential_db(paths.data_home, "zai", active=1)
+    assert bootstrap.authenticated(paths) is True
+
+
+def test_missing_credential_table_fails_closed(tmp_path):
+    """A native database without a credential table reads as unauthenticated."""
+    paths = resolve_opencode_paths(tmp_path)
+    db = paths.data_home / "opencode" / "opencode.db"
+    db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE unrelated (x INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()
+    assert bootstrap.authenticated(paths) is False
+
+
+def test_corrupt_credential_database_fails_closed(tmp_path):
+    """A garbage database file reads as unauthenticated, never crashes."""
+    paths = resolve_opencode_paths(tmp_path)
+    db = paths.data_home / "opencode" / "opencode.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"this is not sqlite")
+    assert bootstrap.authenticated(paths) is False
+
+
+def test_model_status_trusts_nonempty_listing(tmp_path, monkeypatch):
+    """A non-empty listing is authoritative: presence verifies, absence fails."""
+    paths = resolve_opencode_paths(tmp_path)
     model = "zai-coding-plan/glm-5.3-flash"
-
-    monkeypatch.setattr(bootstrap, "list_models", lambda *args, **kwargs: [])
-    assert bootstrap.model_available("opencode", paths, model) is False
-    _seed_credential_db(paths.data_home, "zai-coding-plan")
-    assert bootstrap.model_available("opencode", paths, model) is True
-
     monkeypatch.setattr(
-        bootstrap, "list_models", lambda *args, **kwargs: ["openai/gpt-4o-mini"]
+        bootstrap, "list_models", lambda *args, **kwargs: [model, "openai/gpt-4o"]
     )
-    assert bootstrap.model_available("opencode", paths, model) is False
-    monkeypatch.setattr(bootstrap, "list_models", lambda *args, **kwargs: [model])
-    assert bootstrap.model_available("opencode", paths, model) is True
+    listed = bootstrap.model_status("opencode", paths, model)
+    assert (listed.available, listed.verified) == (True, True)
+    missing = bootstrap.model_status("opencode", paths, "openai/o3-mini")
+    assert (missing.available, missing.verified) == (False, True)
+
+
+def test_model_status_empty_listing_with_credential_is_unverified(
+        tmp_path, monkeypatch, seed_credential_db):
+    """The empty listing carries no model-id signal, so the fallback is unverified.
+
+    `models --standalone` exits 0 with EMPTY output both on working installs
+    and with zero credentials, so the credential fallback must be reported as
+    available-but-unverified: it proves the provider is credentialed, not that
+    the exact model id exists.
+    """
+    paths = resolve_opencode_paths(tmp_path)
+    seed_credential_db(paths.data_home, "zai-coding-plan", active=1)
+    monkeypatch.setattr(bootstrap, "list_models", lambda *args, **kwargs: [])
+
+    real = bootstrap.model_status("opencode", paths, "zai-coding-plan/glm-5.3-flash")
+    assert (real.available, real.verified) == (True, False)
+    # A nonexistent id under the credentialed provider gets the SAME outcome:
+    # exactly why this state must be surfaced as unverified, not as a pass.
+    bogus = bootstrap.model_status("opencode", paths, "zai-coding-plan/does-not-exist-9")
+    assert (bogus.available, bogus.verified) == (True, False)
+
+
+def test_model_status_empty_listing_without_live_credential_fails(
+        tmp_path, monkeypatch, seed_credential_db):
+    """Without a live row for the provider the model is genuinely unavailable."""
+    paths = resolve_opencode_paths(tmp_path)
+    monkeypatch.setattr(bootstrap, "list_models", lambda *args, **kwargs: [])
+    none = bootstrap.model_status("opencode", paths, "zai-coding-plan/glm-5.3-flash")
+    assert (none.available, none.verified) == (False, False)
+
+    seed_credential_db(paths.data_home, "zai-coding-plan", active=0)
+    inactive = bootstrap.model_status(
+        "opencode", paths, "zai-coding-plan/glm-5.3-flash"
+    )
+    assert (inactive.available, inactive.verified) == (False, False)
 
 
 def test_bootstrap_probe_subcommands_pass_standalone(tmp_path, monkeypatch):
@@ -207,6 +262,18 @@ def test_probe_timeout_becomes_reported_failure(tmp_path, monkeypatch):
     with pytest.raises(bootstrap.OpenCodeBootstrapError, match="did not finish"):
         bootstrap.list_models("opencode", paths)
     assert bootstrap.authenticated(paths) is False
+
+
+def test_wedged_process_is_killed_by_probe_timeout(tmp_path):
+    """A really hanging CLI is killed and the probe raises within the budget."""
+    wedged = tmp_path / "wedged-opencode"
+    wedged.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    wedged.chmod(0o755)
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        bootstrap._run(str(wedged), ["models"], resolve_opencode_paths(tmp_path),
+                       timeout=0.5)
+    assert time.monotonic() - started < 10
 
 
 def test_paths_are_isolated_and_shared(tmp_path):

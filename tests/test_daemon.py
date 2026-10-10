@@ -116,7 +116,9 @@ def test_doctor_validates_user_and_permissions(tmp_path, monkeypatch):
     version_mock = SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25")
     monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
     monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
-    monkeypatch.setattr("oi_agent.daemon.model_available", lambda *args: True)
+    monkeypatch.setattr(
+        "oi_agent.opencode.bootstrap.list_models", lambda *args: ["provider/model"]
+    )
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
 
     monkeypatch.setattr("oi_agent.daemon._identity", lambda user, *args: DaemonIdentity(user, tmp_path, 0, 0))
@@ -151,7 +153,9 @@ def test_doctor_detects_stale_leases_and_dead_jobs(tmp_path, monkeypatch):
     version_mock = SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25")
     monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
     monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
-    monkeypatch.setattr("oi_agent.daemon.model_available", lambda *args: True)
+    monkeypatch.setattr(
+        "oi_agent.opencode.bootstrap.list_models", lambda *args: ["provider/model"]
+    )
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
 
     # Clean store: no failures
@@ -205,8 +209,6 @@ def _patch_doctor_opencode(monkeypatch, tmp_path):
     """
     from types import SimpleNamespace
 
-    from test_opencode_bootstrap import _seed_credential_db
-
     from oi_agent.opencode import bootstrap
     from oi_agent.opencode.paths import resolve_opencode_paths
 
@@ -223,18 +225,56 @@ def _patch_doctor_opencode(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="")
 
     monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
-    return _seed_credential_db, resolve_opencode_paths(tmp_path)
+    return resolve_opencode_paths(tmp_path)
 
 
-def test_doctor_v2_output_shapes_do_not_false_fail(tmp_path, monkeypatch):
+def test_doctor_v2_output_shapes_do_not_false_fail(tmp_path, monkeypatch, seed_credential_db):
     """A credentialed install passes doctor despite v2's empty probe output."""
     cfg = _doctor_v2_config(tmp_path)
-    seed, paths = _patch_doctor_opencode(monkeypatch, tmp_path)
-    seed(paths.data_home, "zai-coding-plan")
+    paths = _patch_doctor_opencode(monkeypatch, tmp_path)
+    seed_credential_db(paths.data_home, "zai-coding-plan")
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
 
-    failures = doctor(cfg)
+    warnings: list[str] = []
+    failures = doctor(cfg, warnings=warnings)
     assert failures == []
+    # The empty `models` listing must NOT be reported as a silent pass.
+    assert any(
+        "not verified against OpenCode's model list" in w and "zai-coding-plan/glm-5.3-flash" in w
+        for w in warnings
+    )
+
+
+def test_doctor_warns_not_fails_for_nonexistent_model_under_credentialed_provider(
+        tmp_path, monkeypatch, seed_credential_db):
+    """An unlisted model id with a provider credential warns; it never passes silently
+    and never fails, because the empty listing cannot confirm or deny the id."""
+    cfg = _doctor_v2_config(tmp_path)
+    cfg.opencode_model = "zai-coding-plan/does-not-exist-9"
+    paths = _patch_doctor_opencode(monkeypatch, tmp_path)
+    seed_credential_db(paths.data_home, "zai-coding-plan")
+    monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
+
+    warnings: list[str] = []
+    failures = doctor(cfg, warnings=warnings)
+    assert failures == []
+    assert any("zai-coding-plan/does-not-exist-9" in w for w in warnings)
+
+
+def test_doctor_fails_for_model_missing_from_nonempty_listing(tmp_path, monkeypatch):
+    """A non-empty listing is authoritative: an absent model id is a failure."""
+    cfg = _doctor_v2_config(tmp_path)
+    cfg.opencode_model = "openai/o3-mini"
+    _patch_doctor_opencode(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "oi_agent.opencode.bootstrap.list_models", lambda *args: ["openai/gpt-4o"]
+    )
+    monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
+
+    warnings: list[str] = []
+    failures = doctor(cfg, warnings=warnings)
+    assert any("selected model unavailable: openai/o3-mini" in f for f in failures)
+    assert warnings == []
 
 
 def test_doctor_reports_missing_credential_and_model_without_store(tmp_path, monkeypatch):
@@ -243,6 +283,8 @@ def test_doctor_reports_missing_credential_and_model_without_store(tmp_path, mon
     _patch_doctor_opencode(monkeypatch, tmp_path)
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
 
-    failures = doctor(cfg)
+    warnings: list[str] = []
+    failures = doctor(cfg, warnings=warnings)
     assert any("no OpenCode provider is authenticated" in f for f in failures)
     assert any("selected model unavailable" in f for f in failures)
+    assert warnings == []

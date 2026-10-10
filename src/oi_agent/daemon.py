@@ -14,7 +14,7 @@ from .opencode.bootstrap import (
     OpenCodeBootstrapError,
     authenticated,
     check_version,
-    model_available,
+    model_status,
 )
 from .opencode.paths import resolve_opencode_paths
 from .store import Store
@@ -398,17 +398,23 @@ def uninstall(service_name: str = DEFAULT_SERVICE_NAME,
             raise DaemonError(f"could not remove service user {user!r}")
 
 
-def doctor(cfg: Config, *, user: str | None = None) -> list[str]:
+def doctor(cfg: Config, *, user: str | None = None,
+           warnings: list[str] | None = None) -> list[str]:
     """Run OpenCode, auth, model, repository, token, and state preflight checks.
 
     Args:
         cfg (Config): OpenCode and daemon configuration.
         user (str | None): Optional service user name to validate permissions for.
+        warnings (list[str] | None): Optional collector for conditions that
+            are neither passes nor failures — currently a configured model
+            that could not be verified against OpenCode's (possibly empty)
+            model list while its provider holds an active credential.
 
     Returns:
         list[str]: Human-readable failed checks; an empty list means all checks passed.
     """
     failures: list[str] = []
+    warn = warnings if warnings is not None else []
     identity = None
     if user:
         try:
@@ -420,8 +426,14 @@ def doctor(cfg: Config, *, user: str | None = None) -> list[str]:
         version = check_version(cfg.opencode_binary, paths)
         if not authenticated(paths):
             failures.append("no OpenCode provider is authenticated")
-        if not model_available(version.binary, paths, cfg.opencode_model):
+        status = model_status(version.binary, paths, cfg.opencode_model)
+        if not status.available:
             failures.append(f"selected model unavailable: {cfg.opencode_model}")
+        elif not status.verified:
+            warn.append(
+                f"model {cfg.opencode_model} not verified against OpenCode's "
+                "model list; provider credential present"
+            )
     except OpenCodeBootstrapError as exc:
         failures.append(str(exc))
     for target in cfg.watches:

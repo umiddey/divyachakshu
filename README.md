@@ -158,7 +158,7 @@ contents, while independent text and document parts still get answered.
 ```bash
 uv sync --dev
 opencode --version
-opencode auth login
+opencode auth login --standalone
 
 oi init --model provider/model
 # Interactive init asks for Discord token, tone, and watched repositories.
@@ -175,6 +175,16 @@ aborts setup; it never creates a degraded configuration.
 
 OpenCode credentials stay in its isolated credential store. OI's `.env` stores
 only the configured Discord token environment variable and is mode `0600`.
+
+How OI checks OpenCode (doctor, init): every bootstrap subcommand runs with
+`--standalone` and a bounded timeout, so it never connects to a shared
+`opencode serve --service` on the managed port. Authentication is read from
+the isolated credential store (active rows only); the model id itself is
+checked against `opencode models`. That listing can legitimately be empty —
+in that case a credentialed provider is reported as `model <id> not verified
+against OpenCode's model list; provider credential present` (a warning, not a
+failure), and `oi init` without `--model` asks for an explicit model instead
+of guessing.
 
 ## Config sketch
 

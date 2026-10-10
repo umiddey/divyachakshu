@@ -138,6 +138,92 @@ def test_interactive_missing_opencode_requests_only_install_consent(
     assert not (tmp_path / ".local/share/oi/opencode").exists()
 
 
+def _patch_ensure_installed(tmp_path, monkeypatch):
+    """Pin _ensure_opencode past installation: v2 binary, authenticated store."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        cli,
+        "check_version",
+        lambda *args, **kwargs: SimpleNamespace(
+            binary="opencode", version=(2, 0, 5), raw="opencode 2.0.5"
+        ),
+    )
+    monkeypatch.setattr(cli, "authenticated", lambda *args: True)
+
+
+def test_init_without_model_and_empty_listing_requires_model(tmp_path, monkeypatch):
+    """An empty v2 model listing cannot select a default; init demands --model.
+
+    The old hard-coded 'openai/gpt-4o-mini' default wrote an unprovisioned
+    provider into the config for zai-only installs, and the empty listing is
+    also the proven shape of a WORKING install, so it cannot choose a model.
+    """
+    from oi_agent.opencode.bootstrap import OpenCodeBootstrapError
+
+    _patch_ensure_installed(tmp_path, monkeypatch)
+    # raising=False: committed code resolves list_models via cli's own import.
+    monkeypatch.setattr("oi_agent.cli.list_models", lambda *a, **k: [], raising=False)
+    monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", lambda *a, **k: [])
+    with pytest.raises(OpenCodeBootstrapError, match="--model"):
+        cli._ensure_opencode(None, True)
+
+
+def test_init_without_model_names_credentialed_providers(tmp_path, monkeypatch, seed_credential_db):
+    """The actionable error names the credentialed providers to pick --model from."""
+    from oi_agent.opencode.bootstrap import OpenCodeBootstrapError
+    from oi_agent.opencode.paths import resolve_opencode_paths
+
+    _patch_ensure_installed(tmp_path, monkeypatch)
+    monkeypatch.setattr("oi_agent.cli.list_models", lambda *a, **k: [], raising=False)
+    monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", lambda *a, **k: [])
+    seed_credential_db(resolve_opencode_paths(tmp_path).data_home, "zai-coding-plan")
+    with pytest.raises(OpenCodeBootstrapError, match="zai-coding-plan"):
+        cli._ensure_opencode(None, True)
+
+
+def test_init_with_model_probes_models_once(tmp_path, monkeypatch):
+    """An explicit --model runs exactly one `models` probe, not two.
+
+    Counted at the subprocess layer so the patch cannot miss either the
+    module-local import or the bootstrap-internal call.
+    """
+    from oi_agent.opencode import bootstrap as bootstrap_module
+
+    _patch_ensure_installed(tmp_path, monkeypatch)
+    calls = []
+
+    def counting_run(cmd, **kwargs):
+        if "models" in cmd:
+            calls.append(list(cmd))
+            return SimpleNamespace(returncode=0, stdout="zai-coding-plan/glm-5.3-flash\n")
+        return SimpleNamespace(returncode=0, stdout="No authenticated integrations\n")
+
+    monkeypatch.setattr(bootstrap_module.subprocess, "run", counting_run)
+    model = cli._ensure_opencode("zai-coding-plan/glm-5.3-flash", True)
+    assert model == "zai-coding-plan/glm-5.3-flash"
+    assert len(calls) == 1
+
+
+def test_init_probe_failure_exits_cleanly_without_traceback(tmp_path, monkeypatch):
+    """A wedged or failing probe surfaces as a red message and exit 1."""
+    from oi_agent.opencode.bootstrap import OpenCodeBootstrapError
+
+    _patch_ensure_installed(tmp_path, monkeypatch)
+
+    def wedged(*args, **kwargs):
+        raise OpenCodeBootstrapError(
+            "OpenCode model listing did not finish within 15 s; another "
+            "OpenCode process may be holding the managed service port"
+        )
+
+    monkeypatch.setattr("oi_agent.opencode.bootstrap.list_models", wedged)
+    monkeypatch.setattr("oi_agent.cli.list_models", wedged, raising=False)
+    result = runner.invoke(app, ["init", "--model", "zai-coding-plan/glm-5.3-flash", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "did not finish" in result.output
+    assert not isinstance(result.exception, OpenCodeBootstrapError)
+
+
 def test_queue_status_command(tmp_path):
     """Verify queue status displays metrics table cleanly.
 
@@ -245,7 +331,9 @@ def test_doctor_command_detects_store_queue_failures(tmp_path, monkeypatch):
     version_mock = SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25")
     monkeypatch.setattr("oi_agent.daemon.check_version", lambda *args: version_mock)
     monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: True)
-    monkeypatch.setattr("oi_agent.daemon.model_available", lambda *args: True)
+    monkeypatch.setattr(
+        "oi_agent.opencode.bootstrap.list_models", lambda *args: ["openai/gpt-4o-mini"]
+    )
     monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
     # Healthy store
     store = Store(store_path)

@@ -50,9 +50,10 @@ from .opencode.bootstrap import (
     authenticate,
     authenticated,
     check_version,
+    credential_integrations,
     install_opencode,
     list_models,
-    model_available,
+    model_status,
 )
 from .opencode.paths import resolve_opencode_paths
 from .store import Store
@@ -124,15 +125,32 @@ def _ensure_opencode(requested_model: str | None, consent: bool) -> str:
         console.print("[yellow]Authenticating OpenCode provider...[/yellow]")
         authenticate(version.binary, paths)
 
-    models = list_models(version.binary, paths)
     if requested_model:
-        if not model_available(version.binary, paths, requested_model):
+        status = model_status(version.binary, paths, requested_model)
+        if not status.available:
             console.print(f"[yellow]warning: model {requested_model} not in detected models[/yellow]")
+        elif not status.verified:
+            console.print(
+                f"[yellow]note: model {requested_model} not verified against "
+                "OpenCode's model list; provider credential present[/yellow]"
+            )
         return requested_model
 
+    models = list_models(version.binary, paths)
     if models:
         return models[0]
-    return "openai/gpt-4o-mini"
+    # An empty listing is also the proven shape of a working install, so it
+    # cannot select a model; never default to an unprovisioned provider id.
+    credentialed = sorted(credential_integrations(paths))
+    if credentialed:
+        raise OpenCodeBootstrapError(
+            "OpenCode's model list is empty, so no model can be detected; "
+            f"pass --model explicitly (credentialed providers: {', '.join(credentialed)})"
+        )
+    raise OpenCodeBootstrapError(
+        "OpenCode has no model list and no active provider credentials; run "
+        "`opencode auth login --standalone`, then pass --model explicitly"
+    )
 
 
 @app.command()
@@ -160,6 +178,9 @@ def init(
         configured_model = _ensure_opencode(model, consent)
     except typer.Exit:
         raise
+    except OpenCodeBootstrapError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
     def ask_secret(label: str) -> str:
         """Prompt for a secret without echoing it."""
@@ -767,7 +788,10 @@ def doctor(
     """Run preflight health checks for OpenCode, model, repos, token, and state."""
     cfg = _load_or_die(config)
     load_secrets()
-    failures = run_doctor(cfg, user=user)
+    warnings: list[str] = []
+    failures = run_doctor(cfg, user=user, warnings=warnings)
+    for warning in warnings:
+        console.print(f"  [yellow]WARN[/yellow] {warning}")
     if failures:
         console.print("[bold red]Preflight check failed:[/bold red]")
         for f in failures:

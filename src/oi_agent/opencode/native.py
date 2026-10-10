@@ -298,7 +298,9 @@ def copy_isolated_credentials(source_db: Path, target_db: Path) -> int:
     if not source_db.is_file() or not target_db.is_file():
         return 0
     try:
-        source = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
+        source = sqlite3.connect(
+            source_db.resolve().as_uri() + "?mode=ro", uri=True
+        )
     except sqlite3.Error:
         return 0
     try:
@@ -364,7 +366,9 @@ def verify_completion(
     if not db_path.is_file():
         return NativeCompletion(False, COMPLETION_NO_DB)
     try:
-        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        connection = sqlite3.connect(
+            db_path.resolve().as_uri() + "?mode=ro", uri=True
+        )
     except sqlite3.Error:
         return NativeCompletion(False, COMPLETION_NO_DB)
     try:

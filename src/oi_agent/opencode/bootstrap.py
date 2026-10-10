@@ -174,7 +174,7 @@ def install_opencode(paths: OpenCodePaths) -> str:
 
 def _run(binary: str, args: list[str], paths: OpenCodePaths,
          *, inherit_stdio: bool = False,
-         timeout: float = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+         timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run one allowlisted OpenCode bootstrap command.
 
     Every subcommand runs ``--standalone``: without it a v2 CLI connects to
@@ -188,7 +188,7 @@ def _run(binary: str, args: list[str], paths: OpenCodePaths,
     kwargs = {
         "env": paths.environment(),
         "check": False,
-        "timeout": timeout,
+        "timeout": PROBE_TIMEOUT_SECONDS if timeout is None else timeout,
     }
     if not inherit_stdio:
         kwargs.update(capture_output=True, text=True)
@@ -196,21 +196,28 @@ def _run(binary: str, args: list[str], paths: OpenCodePaths,
 
 
 def credential_integrations(paths: OpenCodePaths) -> frozenset[str]:
-    """Return integration IDs holding a stored credential, read-only.
+    """Return integration IDs not explicitly deactivated, read-only.
 
     Reuses the read pattern of native.copy_isolated_credentials: the isolated
     native database is opened read-only and only the ``integration_id``
-    column is selected, so no credential value ever enters OI memory.
+    column is selected, so no credential value ever enters OI memory. A row
+    counts unless it is EXPLICITLY deactivated (``active = 0``): the real
+    OI-isolated store carries ``active = NULL`` rows that provably
+    authenticate live runs, while a ``0`` row is a deliberate deactivation.
     """
     database = paths.data_home / NATIVE_DB_RELATIVE
     if not database.is_file():
         return frozenset()
     try:
-        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        connection = sqlite3.connect(
+            database.resolve().as_uri() + "?mode=ro", uri=True
+        )
     except sqlite3.Error:
         return frozenset()
     try:
-        rows = connection.execute("SELECT integration_id FROM credential").fetchall()
+        rows = connection.execute(
+            "SELECT integration_id FROM credential WHERE active IS NOT 0"
+        ).fetchall()
     except sqlite3.Error:
         return frozenset()
     finally:
@@ -237,7 +244,8 @@ def authenticate(binary: str, paths: OpenCodePaths) -> None:
                      inherit_stdio=True, timeout=LOGIN_TIMEOUT_SECONDS)
     if completed.returncode != 0 or not authenticated(paths):
         raise OpenCodeBootstrapError(
-            "OpenCode authentication was not completed; rerun `opencode auth login`"
+            "OpenCode authentication was not completed; rerun "
+            "`opencode auth login --standalone`"
         )
 
 
@@ -259,21 +267,39 @@ def list_models(binary: str, paths: OpenCodePaths) -> list[str]:
     return models
 
 
-def model_available(binary: str, paths: OpenCodePaths, model: str) -> bool:
-    """Return whether `model` can run in the isolated native environment.
+@dataclass(frozen=True)
+class ModelStatus:
+    """Outcome of a model availability probe.
 
-    A non-empty `models` listing is the authoritative availability set. An
+    ``available=False`` is a hard failure. ``available=True`` with
+    ``verified=False`` is the empty-listing fallback: a provider credential
+    exists, but OpenCode's own model listing could not confirm the exact id
+    (the listing is also empty on working installs, so it carries no model-id
+    signal). Callers must surface that state as a warning — it proves the
+    provider is credentialed, NOT that the model id exists or that a run
+    would succeed.
+    """
+
+    available: bool
+    verified: bool
+
+
+def model_status(binary: str, paths: OpenCodePaths, model: str) -> ModelStatus:
+    """Probe whether `model` can run in the isolated native environment.
+
+    A non-empty `models` listing is the authoritative availability set: a
+    listed id is (available, verified), an unlisted id is unavailable. An
     empty listing is a proven v2.0.5 shape (`models --standalone` exits 0
-    with no output while runs against credentialed providers succeed), so it
-    must not false-fail: the probe then falls back to the credential store
-    and requires an integration credential for the model's provider prefix —
-    exactly what a run itself authenticates with.
+    with no output even on working installs), so it must not false-fail: the
+    probe falls back to the credential store for the model's provider prefix
+    and returns the distinct unverified-availability state documented on
+    ModelStatus.
     """
     models = list_models(binary, paths)
     if models:
-        return model in models
+        return ModelStatus(model in models, True)
     provider = model.split("/", 1)[0]
-    return provider in credential_integrations(paths)
+    return ModelStatus(provider in credential_integrations(paths), False)
 
 
 def bootstrap(binary: str, paths: OpenCodePaths, *, install: bool = False,
