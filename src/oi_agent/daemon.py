@@ -411,7 +411,8 @@ def doctor(cfg: Config, *, user: str | None = None,
             model list while its provider holds an active credential.
 
     Returns:
-        list[str]: Human-readable failed checks; an empty list means all checks passed.
+        list[str]: Human-readable failed checks. An empty list means no check
+        failed; entries collected in ``warnings`` still need attention.
     """
     failures: list[str] = []
     warn = warnings if warnings is not None else []

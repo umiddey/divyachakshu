@@ -306,17 +306,16 @@ def model_status(binary: str, paths: OpenCodePaths, model: str) -> ModelStatus:
     and returns the distinct unverified-availability state documented on
     ModelStatus.
 
-    What `models` filters on (read-only probe, 2026-10-10, v2.0.5): its help
-    says only "List all available models" with no filter flags. In the
-    operator's normal HOME it prints a large catalog (541 ids) spanning many
-    providers — including ones with NO stored credential (openrouter,
-    nvidia) — so the listing is catalog-driven and NOT credential-filtered.
-    The same command in OI's isolated environment exits 0 with EMPTY output
-    whether or not credentials exist. Two consequences: the empty listing
-    carries no auth or availability signal (hence the fallback), and the
-    non-empty path deliberately does NOT require a provider credential —
-    requiring one would false-fail models reachable via environment-provided
-    keys that never touch the credential store.
+    What `models` filters on (v2.0.5): its help says only "List all
+    available models" with no filter flags. Observed 2026-10-11 on the
+    operator's machine: `opencode models` and `opencode models --standalone`
+    both exit 0 with EMPTY output, in the operator's normal HOME as well as
+    in OI's isolated environment, whether or not credentials exist. So the
+    empty listing carries no auth or availability signal (hence the
+    fallback). The non-empty path is kept for CLIs that do list models; it
+    deliberately does NOT require a provider credential, because requiring
+    one would false-fail models reachable via environment-provided keys that
+    never touch the credential store.
     """
     models = list_models(binary, paths)
     if models:

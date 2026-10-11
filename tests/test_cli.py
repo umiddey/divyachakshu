@@ -196,12 +196,36 @@ def test_init_with_model_probes_models_once(tmp_path, monkeypatch):
         if "models" in cmd:
             calls.append(list(cmd))
             return SimpleNamespace(returncode=0, stdout="zai-coding-plan/glm-5.3-flash\n")
-        return SimpleNamespace(returncode=0, stdout="No authenticated integrations\n")
+        raise AssertionError(f"unexpected OpenCode call: {cmd}")
 
     monkeypatch.setattr(bootstrap_module.subprocess, "run", counting_run)
     model = cli._ensure_opencode("zai-coding-plan/glm-5.3-flash", True)
     assert model == "zai-coding-plan/glm-5.3-flash"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("available", "state"), [(True, "present"), (False, "absent")])
+def test_init_unverified_model_warning_names_credential_state(
+    tmp_path, monkeypatch, available, state
+):
+    """An unverifiable --model is kept, with a warning naming the credential state."""
+    from rich.console import Console
+
+    from oi_agent.opencode.bootstrap import ModelStatus
+
+    _patch_ensure_installed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cli, "model_status", lambda *args: ModelStatus(available=available, verified=False)
+    )
+    recorder = Console(record=True, width=300)
+    monkeypatch.setattr(cli, "console", recorder)
+
+    assert cli._ensure_opencode("zai-coding-plan/glm-5.3-flash", True) == (
+        "zai-coding-plan/glm-5.3-flash"
+    )
+    text = recorder.export_text()
+    assert "not verified against OpenCode's model list" in text
+    assert f"provider credential {state}" in text
 
 
 def test_init_probe_failure_exits_cleanly_without_traceback(tmp_path, monkeypatch):
