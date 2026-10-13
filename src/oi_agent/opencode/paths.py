@@ -13,7 +13,7 @@ _ALLOWED_ENV_VARS = {
     # Tooling & Runtime managers
     "BUN_INSTALL", "NVM_DIR", "NVM_BIN", "MISE_DATA_DIR", "MISE_CONFIG_DIR",
     "ASDF_DIR", "ASDF_DATA_DIR", "CARGO_HOME", "RUSTUP_HOME", "DENO_INSTALL",
-    "PNPM_HOME",
+    "PNPM_HOME", "MISE_TRUSTED_CONFIG_PATHS",
     # Network, Proxy, & TLS
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
