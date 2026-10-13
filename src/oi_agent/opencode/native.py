@@ -125,7 +125,12 @@ def environment_for(root: Path, data_home: Path) -> dict[str, str]:
     """
     environment = {
         key: value for key, value in os.environ.items()
-        if key in {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SHELL", "TZ"}
+        if key in {
+            "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SHELL", "TZ",
+            # Non-secret: the disposable HOME hides mise's trust store, so the
+            # operator's explicit trust list must be passed through.
+            "MISE_TRUSTED_CONFIG_PATHS",
+        }
     }
     environment.update({
         "HOME": str(root / "home"),
