@@ -717,6 +717,45 @@ def _demote_images_without_vision(prepared: PreparedExternal) -> None:
     prepared.inputs.attachments = rewritten
 
 
+_SECRET_PATTERN = re.compile(
+    r"(?i)(bearer\s+|(?:api[_-]?key|token|secret|password|authorization)[\"']?\s*[:=]\s*[\"']?"
+    r"(?:bearer\s+)?)"
+    r"[^\s\"',}]+"
+)
+_LONG_TOKEN_PATTERN = re.compile(r"\b[A-Za-z0-9_\-.]{32,}\b")
+_FAILURE_DETAIL_CHARS = 600
+
+
+def _redact_detail(text: str) -> str:
+    """Hide credential-shaped values so failure detail is safe to log."""
+    text = _SECRET_PATTERN.sub(lambda m: f"{m.group(1)}<hidden>", text)
+    text = _LONG_TOKEN_PATTERN.sub("<hidden>", text)
+    text = " ".join(text.split())
+    return text[:_FAILURE_DETAIL_CHARS]
+
+
+def _log_failure_detail(
+    label: str, error_class: str, stderr_sample: str, events: list[dict[str, Any]]
+) -> None:
+    """Log OpenCode's own error text (stderr and error events), redacted."""
+    event_errors = []
+    for event in events:
+        if event.get("type") != "error":
+            continue
+        err = event.get("error")
+        if isinstance(err, dict):
+            event_errors.append(f"{err.get('type', '')}: {err.get('message', '')}")
+        else:
+            event_errors.append(str(err))
+    logger.warning(
+        "[%s] failure error=%s event_errors=%s stderr=%s",
+        label,
+        error_class,
+        _redact_detail(" | ".join(event_errors)) or "none",
+        _redact_detail(stderr_sample) or "none",
+    )
+
+
 class OpenCodeRunner:
     """Run the configured native OI OpenCode agent for one conversation."""
 
@@ -1101,6 +1140,7 @@ class OpenCodeRunner:
                 error_class or "none",
             )
             if error_class:
+                _log_failure_detail("external", error_class, stderr_sample, events)
                 return _failure("none", error_class)
             return Reply(
                 text=_bounded_text(text, self._cfg.max_reply_chars),
@@ -1261,6 +1301,7 @@ class OpenCodeRunner:
             error_class or "none",
         )
         if error_class:
+            _log_failure_detail("opencode", error_class, stderr_sample, events)
             return _failure(final_combined_sha, error_class)
         attachments: tuple[str, ...] = ()
         if write_mode == "docs-only":
@@ -1588,6 +1629,7 @@ class OpenCodeRunner:
                 self._cfg.opencode_model, error_class or "none",
             )
             if error_class:
+                _log_failure_detail("opencode review", error_class, stderr_sample, events)
                 return _review_failure(error_class, sha=provenance)
             # Provenance remains in the structured Reply.sha field, not chat text.
             return Reply(
