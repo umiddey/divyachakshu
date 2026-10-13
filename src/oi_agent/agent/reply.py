@@ -24,4 +24,5 @@ class Reply:
     ok: bool = True
     session_id: str | None = None
     error_class: str | None = None
+    had_content: bool = False
     attachments: tuple[str, ...] = ()

@@ -20,8 +20,8 @@ LEGACY_KEYS = {"agent", "llm", "api_key", "base_url", "search_aliases", "provide
 
 # Controller-owned external inputs. ``disabled`` is the conservative default:
 # an operator opts in with `oi config set external_inputs read-only`, which
-# permits public web/news retrieval and attachment inspection. The native
-# model never receives network tools either way.
+# permits a separate OpenCode research run (websearch/webfetch only). The
+# answer session never receives those tools.
 EXTERNAL_INPUT_MODES = ("disabled", "read-only")
 
 # Native model image capability cannot be proven: the native models catalog

@@ -16,7 +16,6 @@ import pytest
 from oi_agent.agent.reply import Reply
 from oi_agent.config import Config, WatchTarget
 from oi_agent.external import prepare as external_prepare
-from oi_agent.external.retrieval import RetrievalError
 from oi_agent.poster import DeliveryResult
 from oi_agent.store import Store
 from oi_agent.watch import attachments as watch_attachments
@@ -265,8 +264,9 @@ async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
     run_calls = []
     delivered = []
 
-    async def failing_search(query, *, limit=8):
-        raise RetrievalError("no_results")
+    async def failing_research(query, urls, *, max_sources, timeout=180):
+        from oi_agent.external.research import ResearchResult
+        return ResearchResult(False, category="no_results")
 
     async def forbidden_run(*args, **kwargs):
         run_calls.append((args, kwargs))
@@ -280,7 +280,7 @@ async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
         delivered.append(chunk)
         return DeliveryResult(ok=True, discord_message_id=999)
 
-    monkeypatch.setattr(external_prepare, "search_news", failing_search)
+    monkeypatch.setattr(watcher._runner, "run_web_research", failing_research)
     _forbid_retrieval(monkeypatch, "fetch_public_document")
     monkeypatch.setattr(watcher._runner, "run", forbidden_run)
     monkeypatch.setattr(watcher._runner, "run_external_evidence", forbidden_external)

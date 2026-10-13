@@ -108,6 +108,7 @@ class Poster:
         self._cfg = cfg
         self._store = store
         self._headers = {"Authorization": f"Bot {token or ''}"}
+        self.suppress_embeds = False
 
     async def deliver_chunk(
         self,
@@ -153,6 +154,8 @@ class Poster:
             "enforce_nonce": True,
             "allowed_mentions": {"parse": []},
         }
+        if self.suppress_embeds:
+            payload["flags"] = 4
         if reply_to_message_id is not None:
             payload["message_reference"] = {"message_id": reply_to_message_id}
 

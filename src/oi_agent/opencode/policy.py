@@ -339,3 +339,37 @@ def build_tool_free_agent(
             }
         }
     })
+
+
+def build_research_permission_policy() -> list[dict[str, str]]:
+    """Allow only websearch and webfetch. Everything else stays denied.
+
+    Last matching rule wins, so the broad deny comes first, the two web
+    tools are re-granted, and read/glob/edit/shell/external_directory are
+    denied again so a later allow cannot reopen them.
+    """
+    rules = [_rule("*", "*", "deny")]
+    rules.append(_rule("websearch", "*", "allow"))
+    rules.append(_rule("webfetch", "*", "allow"))
+    for action in (
+        "read", "glob", "edit", "shell", "subagent", "skill", "question",
+        "execute", "external_directory",
+    ):
+        rules.append(_rule(action, "*", "deny"))
+    return rules
+
+
+def build_research_agent(model: str, prompt: str, *, steps: int = 8) -> dict[str, object]:
+    """Build the isolated research agent. No repository tools."""
+    return _envelope({
+        "agents": {
+            "oi_research": {
+                "description": "Isolated public web research",
+                "mode": "primary",
+                "model": model,
+                "system": prompt,
+                "steps": steps,
+                "permissions": build_research_permission_policy(),
+            }
+        }
+    })

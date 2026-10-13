@@ -33,7 +33,16 @@ from ..external.intent import (
 from ..external.prepare import (
     AttachmentCandidate,
     PreparedExternal,
+    limitation_note,
     prepare_external_inputs,
+)
+from ..external.research import (
+    FORMAT_REMINDER,
+    decide_research,
+    fill_research_evidence,
+    filter_outbound_urls,
+    marker_retry_needed,
+    public_http_urls,
 )
 from ..opencode.runner import OpenCodeRunner, scope_id_for_target
 from ..poster import Poster, split_message
@@ -851,6 +860,48 @@ class OIWatcher(discord.Client):
         )
         return prepared
 
+    async def _apply_research(
+        self,
+        prepared: PreparedExternal,
+        source: str,
+        history_texts: list[str],
+    ) -> tuple[tuple[str, ...], bool]:
+        """Decide and, when needed, run isolated web research.
+
+        Disabled mode never calls the classifier. A failed research run is an
+        honest limitation, not a silent repository audit.
+        """
+        enabled = self._cfg.external_inputs == "read-only"
+        decision = await decide_research(
+            source, enabled=enabled, complete=self._runner.classify_web_request
+        )
+        if decision.refusal:
+            prepared.refusal = decision.refusal
+            if prepared.inputs.has_external_content:
+                prepared.inputs.notes.append(limitation_note(decision.refusal))
+            return (), False
+        if not decision.research:
+            return (), False
+        urls = public_http_urls([source, *history_texts])
+        result = await self._runner.run_web_research(
+            decision.query or source,
+            urls,
+            max_sources=self._cfg.max_external_evidence_items,
+        )
+        if result.ok and (result.summary or result.sources):
+            fill_research_evidence(
+                prepared.inputs,
+                result,
+                max_sources=self._cfg.max_external_evidence_items,
+            )
+            self._runner._answer_evidence = prepared
+            self._runner._answer_code_question = False
+            return result.sources, True
+        prepared.research_failure = result.category or "no_results"
+        if prepared.inputs.has_external_content:
+            prepared.inputs.notes.append(limitation_note(prepared.research_failure))
+        return (), True
+
     async def _reconcile_scope(
         self,
         channel: discord.abc.Messageable,
@@ -1480,6 +1531,14 @@ class OIWatcher(discord.Client):
                             prompt_content, command_bot_id
                         ),
                     )
+                    source = _extraction_source(prompt_content, command_bot_id)
+                    history_texts = [
+                        str(getattr(item, "content", "") or "")
+                        for item in (*burst_messages, *context.messages, *reply_messages)
+                    ]
+                    research_sources, researched = await self._apply_research(
+                        prepared, source, history_texts
+                    )
                     try:
                         if (
                             prepared.limitation_category is not None
@@ -1490,7 +1549,7 @@ class OIWatcher(discord.Client):
                             # resumes a conversation session, never writes, and
                             # never falls back silently to repository knowledge.
                             reply = Reply(_limitation_reply(prepared.limitation_category), "none")
-                        elif prepared.is_external_run:
+                        elif prepared.inputs.attachments:
                             # An external-evidence run never resumes or returns a
                             # conversation session, so nothing is written under
                             # the conversation key and the run cannot inherit
@@ -1521,6 +1580,14 @@ class OIWatcher(discord.Client):
                                 "protocol_empty_final_answer",
                             }:
                                 self._store.clear_opencode_session(conversation_id, repo_path)
+                                if marker_retry_needed(
+                                    error_class=reply.error_class,
+                                    had_content=reply.had_content,
+                                ):
+                                    self._runner._format_reminder = FORMAT_REMINDER
+                                if researched and prepared.inputs.evidence:
+                                    self._runner._answer_evidence = prepared
+                                    self._runner._answer_code_question = False
                                 reply = await self._runner.run(
                                     target,
                                     author_name,
@@ -1556,6 +1623,11 @@ class OIWatcher(discord.Client):
 
                 reply_cap = self._cfg.max_reply_chars if self._cfg else 2000
                 response_text = reply.text
+                if researched:
+                    allowed = [*research_sources, *public_http_urls([question, source])]
+                    response_text, has_links = filter_outbound_urls(response_text, allowed)
+                else:
+                    has_links = bool(public_http_urls([response_text]))
                 if reply.ok and rotation_notice:
                     answer_cap = max(0, reply_cap - len(rotation_notice) - 2)
                     response_text = f"{response_text[:answer_cap].rstrip()}\n\n{rotation_notice}".strip()
@@ -1576,6 +1648,7 @@ class OIWatcher(discord.Client):
 
                 # Attempt immediate delivery
                 poster = Poster(self._cfg, self._store, self._token)
+                poster.suppress_embeds = has_links
                 delivery_failed = False
                 for idx, chunk in enumerate(chunks):
                     nonce = f"{batch_id[:16]}-{idx}"

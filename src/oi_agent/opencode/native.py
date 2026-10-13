@@ -338,6 +338,47 @@ def copy_isolated_credentials(source_db: Path, target_db: Path) -> int:
     return len(rows)
 
 
+def copy_model_catalog(source_db: Path, target_db: Path) -> bool:
+    """Copy the public model catalog the provider route needs.
+
+    Disposable research storage otherwise cannot resolve a configured model
+    (``provider.no-route``). Only the ``models-dev:catalog`` key is copied.
+    Credential values and every other row stay out.
+    """
+    if not source_db.is_file() or not target_db.is_file():
+        return False
+    try:
+        source = sqlite3.connect(source_db.resolve().as_uri() + "?mode=ro", uri=True)
+        row = source.execute(
+            "SELECT key, value, time_created, time_updated FROM kv WHERE key = ?",
+            ("models-dev:catalog",),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        try:
+            source.close()
+        except Exception:
+            pass
+    if row is None:
+        return False
+    try:
+        target = sqlite3.connect(target_db)
+        target.execute(
+            "INSERT OR REPLACE INTO kv (key, value, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            row,
+        )
+        target.commit()
+    except sqlite3.Error:
+        return False
+    finally:
+        try:
+            target.close()
+        except Exception:
+            pass
+    return True
+
+
 def verify_completion(
     db_path: Path,
     session_id: str | None,

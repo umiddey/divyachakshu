@@ -27,9 +27,7 @@ from .intent import (
     REFUSAL_AMBIGUOUS,
     REFUSAL_DISABLED,
     REFUSAL_PRIVATE,
-    PublicRefusal,
     PublicRequest,
-    extract_public_request,
 )
 from .records import (
     MAX_ATTACHMENT_BYTES,
@@ -107,6 +105,7 @@ class PreparedExternal:
     refusal: str | None = None
     image_preparation: ImagePreparation | None = None
     retrieval_category: str | None = None
+    research_failure: str | None = None
 
     @property
     def is_external_run(self) -> bool:
@@ -125,6 +124,8 @@ class PreparedExternal:
         """
         if self.refusal is not None:
             return self.refusal
+        if self.research_failure and not self.inputs.evidence:
+            return self.research_failure
         if self.request is not None and not self.inputs.evidence:
             return self.retrieval_category or "retrieval_unavailable"
         return None
@@ -161,26 +162,11 @@ async def prepare_external_inputs(
         the run finishes so no transient bytes survive.
     """
     prepared = PreparedExternal()
-    if not retrieval_enabled:
-        # A disabled gate makes ZERO outbound requests. If the message still
-        # asks for a public lookup (usable request or refused attempt), say
-        # so plainly instead of silently answering from repository knowledge.
-        if extract_public_request(message) is not None:
-            prepared.refusal = REFUSAL_DISABLED
-    else:
-        outcome = extract_public_request(message)
-        if isinstance(outcome, PublicRequest):
-            prepared.request = outcome
-            await _collect_evidence(prepared, outcome, evidence_items)
-        elif isinstance(outcome, PublicRefusal):
-            prepared.refusal = outcome.reason
+    # Web/news retrieval is a separate OpenCode research run. This function
+    # only bounds attachments. The watcher decides research and records any
+    # refusal or research failure on the returned object.
     if attachments:
         await _collect_attachments(prepared, attachments, max_attachments)
-    category = prepared.limitation_category
-    if category is not None and prepared.inputs.has_external_content:
-        # The external run proceeds for the attachments, but the failed public
-        # attempt must reach the prompt as an explicit controller note.
-        prepared.inputs.notes.append(limitation_note(category))
     return prepared
 
 

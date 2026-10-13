@@ -27,6 +27,13 @@ from ..external.records import (
     STATUS_UNSUPPORTED,
     AttachmentInput,
 )
+from ..external.research import (
+    CLASSIFIER_SYSTEM,
+    ResearchResult,
+    failure_text,
+    new_empty_research_dir,
+    parse_research_output,
+)
 from ..watch.context_request import (
     ContextRequest,
     mentions_expansion,
@@ -40,6 +47,7 @@ from .native import (
     build_argv,
     config_content,
     copy_isolated_credentials,
+    copy_model_catalog,
     initialize_native_schema,
     native_db_path,
     verify_completion,
@@ -47,6 +55,7 @@ from .native import (
 from .paths import resolve_opencode_paths
 from .policy import (
     build_agent_config,
+    build_research_agent,
     build_tool_free_agent,
     normalize_write_dirs,
 )
@@ -447,14 +456,21 @@ def _extract_marked_answer(text: str) -> tuple[str, str | None]:
     return answer, None
 
 
-def _failure(sha: str, error_class: str) -> Reply:
+def _failure(
+    sha: str,
+    error_class: str,
+    *,
+    code_question: bool = True,
+    had_content: bool = False,
+) -> Reply:
     """Build the honest failure reply without exposing subprocess diagnostics."""
     return Reply(
-        text=f"I couldn't verify this against the code ({error_class}) and I'm not going to guess.",
+        text=failure_text(error_class, code_question=code_question),
         sha=sha,
         ok=False,
         session_id=None,
         error_class=error_class,
+        had_content=had_content,
     )
 
 
@@ -763,6 +779,21 @@ class OpenCodeRunner:
         """Create a runner using the same config and isolated XDG resolver."""
         self._cfg = cfg
         self._store = store
+        self._answer_evidence: PreparedExternal | None = None
+        self._answer_code_question = True
+        self._format_reminder: str | None = None
+
+    def _take_answer_overrides(
+        self,
+    ) -> tuple[PreparedExternal | None, bool, str | None]:
+        """Consume one-shot answer-run overrides set by the watcher."""
+        evidence = self._answer_evidence
+        code_question = self._answer_code_question
+        reminder = self._format_reminder
+        self._answer_evidence = None
+        self._answer_code_question = True
+        self._format_reminder = None
+        return evidence, code_question, reminder
 
     async def run(
         self,
@@ -806,6 +837,7 @@ class OpenCodeRunner:
         ]
 
         async with await _acquire_repo_locks(repo_paths):
+            evidence, code_question, reminder = self._take_answer_overrides()
             try:
                 # Network-probing resolution runs off the event loop; it only
                 # probes configured repositories for fixed provider refs.
@@ -818,6 +850,11 @@ class OpenCodeRunner:
                 )
                 return _review_failure(exc.failure_class)
             if review_target is not None:
+                if evidence is not None:
+                    return await self._run_review_locked(
+                        review_target, author, question, excerpt,
+                        bot_name=bot_name, bot_id=bot_id, prepared=evidence,
+                    )
                 return await self._run_review_locked(
                     review_target, author, question, excerpt,
                     bot_name=bot_name, bot_id=bot_id,
@@ -833,6 +870,9 @@ class OpenCodeRunner:
                 member_id,
                 bot_name=bot_name,
                 bot_id=bot_id,
+                evidence=evidence,
+                code_question=code_question,
+                format_reminder=reminder,
             )
     async def run_raw_prompt(
         self,
@@ -927,6 +967,149 @@ class OpenCodeRunner:
             if process is not None:
                 await _terminate_process(process)
             return None
+        finally:
+            for task in (stdout_task, stderr_task):
+                if task is not None and not task.done():
+                    task.cancel()
+
+    async def classify_web_request(self, message: str) -> str | None:
+        """Classify one request with the configured model and no tools."""
+        try:
+            return await self.run_raw_prompt(
+                message,
+                system_prompt=CLASSIFIER_SYSTEM,
+                timeout=30,
+            )
+        except ValueError:
+            return None
+
+    async def run_web_research(
+        self,
+        query: str,
+        urls: list[str],
+        *,
+        max_sources: int,
+        timeout: int = 180,
+    ) -> ResearchResult:
+        """Run public web research in an empty directory and an isolated home.
+
+        The permission policy allows only websearch and webfetch. No repository,
+        channel history, or OI secret environment variable is supplied.
+        """
+        try:
+            binary = resolve_runtime_binary(
+                self._cfg.opencode_binary, resolve_opencode_paths()
+            )
+        except Exception:  # noqa: BLE001 - config/bootstrap boundary
+            return ResearchResult(False, category="binary_unavailable")
+        link_lines = "\n".join(f"- {url}" for url in urls) or "(none)"
+        prompt = (
+            f"QUESTION:\n{query.strip()}\n\n"
+            "PUBLIC URLS FROM THE REQUEST AND RECENT CHANNEL MESSAGES:\n"
+            f"{link_lines}\n"
+        )
+        system = (
+            "You research public web pages. Use only websearch and webfetch. "
+            "Do not read files, edit, or run commands. "
+            "Output one JSON object and nothing else: "
+            '{"summary":"factual summary","sources":["https://..."]}. '
+            "Every source must be a URL you actually retrieved. Never invent one."
+        )
+        steps = min(8, max(1, int(self._cfg.opencode_steps)))
+        agent_document = build_research_agent(
+            self._cfg.opencode_model, system, steps=steps
+        )
+        cwd = new_empty_research_dir()
+        disposable = DisposableNativeRoot()
+        try:
+            target_db = await initialize_native_schema(binary, disposable)
+            copied = copy_isolated_credentials(
+                native_db_path(resolve_opencode_paths().data_home), target_db
+            )
+            if copied == 0:
+                return ResearchResult(False, category="no_isolated_credentials")
+            copy_model_catalog(
+                native_db_path(resolve_opencode_paths().data_home), target_db
+            )
+            environment = disposable.environment()
+            environment["OPENCODE_CONFIG_CONTENT"] = config_content(agent_document)
+            argv = [binary, *build_argv(self._cfg.opencode_model, "oi_research")]
+            text, error_class = await self._research_process(
+                argv, prompt, environment, cwd, disposable, timeout=timeout
+            )
+            if error_class or not text:
+                return ResearchResult(False, category=error_class or "empty_response")
+            return parse_research_output(
+                text,
+                max_chars=6000,
+                max_sources=max_sources,
+            )
+        finally:
+            disposable.close()
+            import shutil
+            shutil.rmtree(cwd, ignore_errors=True)
+
+    async def _research_process(
+        self,
+        argv: list[str],
+        prompt: str,
+        environment: dict[str, str],
+        cwd: Path,
+        disposable: DisposableNativeRoot,
+        *,
+        timeout: int,
+    ) -> tuple[str, str | None]:
+        """Spawn one research process and return its completed text."""
+        process = None
+        stdout_task = None
+        stderr_task = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=environment,
+                cwd=str(cwd),
+                start_new_session=(os.name == "posix"),
+            )
+            assert process.stdin is not None
+            process.stdin.write(prompt.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+            assert process.stdout is not None and process.stderr is not None
+            stdout_task = asyncio.create_task(_consume_jsonl(process.stdout))
+            stderr_task = asyncio.create_task(_consume_stderr(process.stderr))
+            await asyncio.wait_for(
+                asyncio.gather(process.wait(), stdout_task, stderr_task),
+                timeout=timeout,
+            )
+            events, _ = stdout_task.result()
+            session_id, message_id, had_error = _stream_identity(events)
+            completion = verify_completion(
+                native_db_path(disposable.data_home),
+                session_id,
+                message_id,
+                returncode=process.returncode,
+                has_error_event=had_error,
+            )
+            text, _, selection_error, _ = _select_final_text_v2(events, completion)
+            if selection_error:
+                return "", selection_error
+            return text, None
+        except asyncio.TimeoutError:
+            if process is not None:
+                await _terminate_process(process)
+            return "", "timeout"
+        except asyncio.CancelledError:
+            if process is not None:
+                await _terminate_process(process)
+            raise
+        except Exception as exc:  # noqa: BLE001 - subprocess boundary
+            logger.warning("[research] process failed: %s", type(exc).__name__)
+            if process is not None:
+                await _terminate_process(process)
+            return "", "process_error"
         finally:
             for task in (stdout_task, stderr_task):
                 if task is not None and not task.done():
@@ -1166,6 +1349,9 @@ class OpenCodeRunner:
         member_id: str | None = None,
         bot_name: str = "",
         bot_id: int | None = None,
+        evidence: PreparedExternal | None = None,
+        code_question: bool = True,
+        format_reminder: str | None = None,
     ) -> Reply:
         """Execute one audit while holding repository serialization locks."""
         all_roots = [root, *additional_roots]
@@ -1204,6 +1390,10 @@ class OpenCodeRunner:
             f"THREAD CONTEXT:\n{excerpt or '(start of conversation)'}\n\n"
             f"LATEST QUESTION:\n{question}"
         )
+        if evidence is not None and evidence.inputs.has_external_content:
+            prompt += _external_evidence_section(evidence)
+        if format_reminder:
+            prompt += f"\n\nFORMAT REMINDER:\n{format_reminder}\n"
 
         try:
             binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
@@ -1247,6 +1437,7 @@ class OpenCodeRunner:
             bot_id=bot_id,
             write_mode=write_mode,
             write_dirs=write_dirs,
+            external_inputs=evidence is not None and evidence.inputs.has_external_content,
         )
 
         run_started = time.time()
@@ -1271,9 +1462,11 @@ class OpenCodeRunner:
         error_class = _merge_error_class(
             error_class, event_error, completion
         )
+        raw_text = text
         if error_class is None:
             text, marker_error = _extract_marked_answer(text)
             error_class = marker_error
+        had_content = bool(raw_text.strip()) and error_class == "protocol_missing_final_marker"
         if error_class is None and not text:
             error_class = "empty_response"
 
@@ -1302,7 +1495,10 @@ class OpenCodeRunner:
         )
         if error_class:
             _log_failure_detail("opencode", error_class, stderr_sample, events)
-            return _failure(final_combined_sha, error_class)
+            return _failure(
+                final_combined_sha, error_class,
+                code_question=code_question, had_content=had_content,
+            )
         attachments: tuple[str, ...] = ()
         if write_mode == "docs-only":
             attachments = _collect_doc_attachments(

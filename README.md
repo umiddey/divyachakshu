@@ -81,13 +81,25 @@ treated as ordinary text: only the explicit forms above trigger a review.
 
 ## External inputs: web, news, files, and images
 
-OI can answer questions that explicitly ask for public internet information or
-attach files. The feature is **off by default** and controller-owned: OI —
-never the model — performs every retrieval, download, and parse, then hands
-the model a bounded, clearly-delimited untrusted-evidence block. The model
-never receives web, shell, or network tools, and text or images inside
-external content can never authorize a tool call, a permission, a wider
-scope, a file write, or a new request.
+OI can answer questions that need public internet information, and it can
+read attached files. The feature is **off by default**. When it is on, OI
+splits the work into two OpenCode runs:
+
+1. A tool-free classifier (the configured model, no tools) decides whether
+   the current request needs research. `!search`, `!news`, `!fetch`, and
+   `!web` are forced yes. `external_inputs = "disabled"` never researches
+   and never calls the classifier.
+2. A separate research run, in a fresh empty directory and an isolated home,
+   may use only `websearch` and `webfetch`. It sees the request text plus
+   public http(s) URLs from that request and from recent channel messages.
+   Private, loopback, and `file:` URLs are dropped. It does not see the
+   repository, channel history, or OI secrets.
+3. The existing answer session keeps the normal policy (web tools denied)
+   and receives the research summary as a bounded untrusted-evidence block.
+
+Before a research answer is posted, any URL that is not in the research
+source list or the user's own message is removed. Replies that still contain
+links are posted with Discord link embeds suppressed.
 
 ### Capability switches
 
@@ -100,29 +112,13 @@ oi config set max_attachment_bytes 8388608     # up to 32 MiB per attachment
 ```
 
 `external_inputs = "disabled"` is the conservative shipped default: explicit
-public requests then get an honest capability limitation, zero retrieval
-requests are made, and ordinary repository behavior is unchanged.
+commands then get an honest capability limitation, the classifier is not
+called, and ordinary repository behavior is unchanged.
 `image_inputs = "on"` states that the configured native model can actually see
-images — the capability cannot be proven automatically, so an operator must
-assert it. With `"off"`, images are described as metadata only: the model is
-told visual understanding is unavailable and must never guess at image
-contents, while independent text and document parts still get answered.
+images. With `"off"`, images are described as metadata only.
 
-### What works
+### Attachments
 
-- **News**: `@OI get the latest news about Python` queries the Google News RSS
-  search endpoint and returns fresh items with title, publisher, link, and
-  publication time, newest first. Items without a parseable publication time
-  are sorted last and labelled.
-- **Web search**: `@OI search the web for Python releases` uses the general
-  Bing RSS endpoint. Result links point at the actual publisher hosts, with
-  bounded descriptions; the search engine's own wrapper pages are never
-  presented as publisher articles.
-- **Public URLs**: a public URL explicitly supplied in the current request is
-  fetched read-only through a DNS-pinned connector that validates every
-  resolved address (loopback, private, link-local, metadata, and reserved
-  ranges refused; redirects re-validated), keeps TLS hostname verification,
-  and refuses proxies and cookies.
 - **Attachments**: plain UTF-8 text/Markdown/CSV/JSON, PDF, and DOCX files are
   actually parsed into bounded evidence text; PNG/JPEG/WebP/GIF images are
   passed as real image files when `image_inputs = "on"`. Scanned or empty PDFs
@@ -132,10 +128,11 @@ contents, while independent text and document parts still get answered.
 
 ### What is refused
 
-- Private-referential asks ("search for the token above", "look up what is in
-  this file") fail with a request for a public topic or URL. Queries and URLs
-  originate only from the current direct request — never from history,
-  attachments, repository evidence, or a previous session.
+- Private-referential commands (`!search the token above`) and bare commands
+  with no topic fail honestly instead of auditing the repository. The
+  research run receives public http(s) URLs from the current request and
+  recent channel messages, never private or file URLs, and never channel
+  history text.
 - Every download enforces the operator caps on actual bytes (declared sizes
   are not trusted), aggregate limits, and an approved HTTPS CDN host list for
   Discord attachments, with no redirects and no signed URLs in evidence or
@@ -203,7 +200,8 @@ environment_mode = "workstation"
 max_session_turns = 30
 session_ttl_days = 7
 
-# Controller-owned external inputs (all optional; conservative defaults):
+# External inputs. disabled never researches. read-only uses a separate
+# OpenCode research run; the answer session still has web tools denied.
 external_inputs = "disabled"        # "disabled" | "read-only"
 image_inputs = "off"                # "off" | "on"
 max_external_evidence_items = 8
