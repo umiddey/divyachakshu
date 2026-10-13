@@ -36,6 +36,7 @@ _COMMAND_RE = re.compile(
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"(?i)(?:https?://|file:)[^\s<>\"')\]]+")
+_LINK_REF_RE = re.compile(r"(?i)\b(?:links?|urls?)\b")
 _TRAILING = ".,;:)]"
 
 
@@ -176,17 +177,23 @@ async def decide_research(
     *,
     enabled: bool,
     complete: Complete,
+    history_urls: Iterable[str] = (),
 ) -> ResearchDecision:
-    """Decide research from a forced command or one tool-free classifier call.
+    """Decide research from a forced command, history links, or one classifier call.
 
-    ``external_inputs`` disabled never calls ``complete``. Forced commands
-    never call it either.
+    ``external_inputs`` disabled never calls ``complete`` and never researches.
+    Forced commands never call it either. A message that refers to links
+    (``link``/``links``/``url``/``urls``, any case, including German
+    ``Link``/``Links``) with a non-empty public history is forced research
+    and does not call the classifier.
     """
     forced = command_decision(message, enabled=enabled)
     if forced is not None:
         return forced
     if not enabled:
         return ResearchDecision(False, "")
+    if history_urls and _LINK_REF_RE.search(message or ""):
+        return ResearchDecision(True, (message or "").strip(), forced=True)
     return parse_classifier_output(await complete(message))
 
 
@@ -271,6 +278,7 @@ def fill_research_evidence(
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     sources = list(result.sources)[: max(1, max_sources)]
     summary = (result.summary or "").strip()
+    before = len(inputs.evidence)
     if summary:
         inputs.evidence.append(EvidenceItem(
             kind="web",
@@ -290,8 +298,13 @@ def fill_research_evidence(
             retrieved_at=now,
             text="",
         ))
+    # A summary row must not evict a source that already fit in max_sources,
+    # and N requested links must survive as N source rows.
+    new_items = inputs.evidence[before:]
     if len(inputs.evidence) > max_sources:
-        inputs.evidence[:] = inputs.evidence[:max_sources]
+        allow = max(max_sources, len(new_items))
+        prior_keep = max(0, allow - len(new_items))
+        inputs.evidence[:] = [*inputs.evidence[:before][:prior_keep], *new_items]
 
 
 def failure_text(error_class: str, *, code_question: bool = True) -> str:

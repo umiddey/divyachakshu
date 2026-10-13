@@ -989,12 +989,15 @@ class OpenCodeRunner:
         urls: list[str],
         *,
         max_sources: int,
-        timeout: int = 180,
+        timeout: int | None = None,
     ) -> ResearchResult:
         """Run public web research in an empty directory and an isolated home.
 
         The permission policy allows only websearch and webfetch. No repository,
-        channel history, or OI secret environment variable is supplied.
+        channel history, or OI secret environment variable is supplied. Every
+        listed public URL is fetched; the step and time budget grow with that
+        list. A caller-supplied timeout is kept; otherwise it is 180 seconds
+        plus 60 seconds per URL.
         """
         try:
             binary = resolve_runtime_binary(
@@ -1003,19 +1006,28 @@ class OpenCodeRunner:
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return ResearchResult(False, category="binary_unavailable")
         link_lines = "\n".join(f"- {url}" for url in urls) or "(none)"
+        fetch_rule = (
+            "Webfetch every listed URL, one by one, then answer. "
+            "List each retrieved URL in sources. "
+            "A URL that fails is reported as failed in the summary, not skipped silently."
+        )
         prompt = (
             f"QUESTION:\n{query.strip()}\n\n"
             "PUBLIC URLS FROM THE REQUEST AND RECENT CHANNEL MESSAGES:\n"
-            f"{link_lines}\n"
+            f"{link_lines}\n\n"
+            f"{fetch_rule}\n"
         )
         system = (
             "You research public web pages. Use only websearch and webfetch. "
+            f"{fetch_rule} "
             "Do not read files, edit, or run commands. "
             "Output one JSON object and nothing else: "
             '{"summary":"factual summary","sources":["https://..."]}. '
             "Every source must be a URL you actually retrieved. Never invent one."
         )
-        steps = max(1, int(self._cfg.opencode_steps))
+        if timeout is None:
+            timeout = 180 + 60 * len(urls)
+        steps = max(1, int(self._cfg.opencode_steps)) + len(urls)
         agent_document = build_research_agent(
             self._cfg.opencode_model, system, steps=steps
         )

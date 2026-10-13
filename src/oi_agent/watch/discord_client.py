@@ -872,8 +872,12 @@ class OIWatcher(discord.Client):
         honest limitation, not a silent repository audit.
         """
         enabled = self._cfg.external_inputs == "read-only"
+        urls = public_http_urls([source, *history_texts])
         decision = await decide_research(
-            source, enabled=enabled, complete=self._runner.classify_web_request
+            source,
+            enabled=enabled,
+            complete=self._runner.classify_web_request,
+            history_urls=urls,
         )
         if decision.refusal:
             prepared.refusal = decision.refusal
@@ -882,17 +886,17 @@ class OIWatcher(discord.Client):
             return (), False
         if not decision.research:
             return (), False
-        urls = public_http_urls([source, *history_texts])
+        limit = max(self._cfg.max_external_evidence_items, len(urls))
         result = await self._runner.run_web_research(
             decision.query or source,
             urls,
-            max_sources=self._cfg.max_external_evidence_items,
+            max_sources=limit,
         )
         if result.ok and (result.summary or result.sources):
             fill_research_evidence(
                 prepared.inputs,
                 result,
-                max_sources=self._cfg.max_external_evidence_items,
+                max_sources=limit,
             )
             self._runner._answer_evidence = prepared
             self._runner._answer_code_question = False
