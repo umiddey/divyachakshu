@@ -130,6 +130,59 @@ def check_version(binary: str, paths: OpenCodePaths) -> OpenCodeVersion:
     return OpenCodeVersion(resolved, version, raw)
 
 
+# Official installer target (curl -fsSL https://opencode.ai/install | bash).
+OFFICIAL_INSTALL_DIR = Path("~/.opencode/bin")
+
+_runtime_binaries: dict[str, str] = {}
+
+
+def _runtime_candidates(binary: str) -> list[Path]:
+    """List every executable a bare command name could mean, PATH order first."""
+    candidate = Path(binary).expanduser()
+    if candidate.parent != Path("."):
+        return [candidate]
+    seen: list[Path] = []
+    dirs = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    for directory in [*dirs, OFFICIAL_INSTALL_DIR.expanduser()]:
+        path = directory / binary
+        if path.is_file() and os.access(path, os.X_OK):
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.append(resolved)
+    return seen
+
+
+def resolve_runtime_binary(binary: str, paths: OpenCodePaths) -> str:
+    """Return the first candidate that passes `check_version` in OI's isolation.
+
+    The first `opencode` on PATH is often a launcher (npx/mise shims, distro
+    wrappers) that installs a different major or breaks under OI's disposable
+    HOME. Every run must use a binary proven to speak the supported contract,
+    so each candidate is version-checked in the isolated environment and the
+    first passing one is cached for the process.
+
+    Raises:
+        OpenCodeBootstrapError: When no candidate passes, naming each rejection.
+    """
+    cached = _runtime_binaries.get(binary)
+    if cached is not None:
+        return cached
+    rejected: list[str] = []
+    for candidate in _runtime_candidates(binary):
+        try:
+            version = check_version(str(candidate), paths)
+        except OpenCodeBootstrapError as exc:
+            rejected.append(f"{candidate}: {exc}")
+            continue
+        _runtime_binaries[binary] = version.binary
+        return version.binary
+    detail = "; ".join(rejected) or "no executable found"
+    raise OpenCodeBootstrapError(
+        f"No usable OpenCode for {binary!r} ({detail}); install a supported "
+        f"release from {INSTALL_DOCS_URL}"
+    )
+
+
 def install_command() -> list[str]:
     """Select one fixed official installer command available on this host."""
     if shutil.which("npm"):

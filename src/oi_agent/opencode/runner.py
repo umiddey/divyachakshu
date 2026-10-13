@@ -33,7 +33,7 @@ from ..watch.context_request import (
     parse_explicit_request,
     parse_spec,
 )
-from .bootstrap import resolve_binary
+from .bootstrap import resolve_runtime_binary
 from .native import (
     DisposableNativeRoot,
     NativeCompletion,
@@ -865,7 +865,7 @@ class OpenCodeRunner:
         paths = resolve_opencode_paths()
         paths.ensure()
         try:
-            binary = resolve_binary(self._cfg.opencode_binary)
+            binary = resolve_runtime_binary(self._cfg.opencode_binary, paths)
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return None
 
@@ -1036,7 +1036,7 @@ class OpenCodeRunner:
         if not inputs.has_external_content:
             return _failure("none", "no_external_content")
         try:
-            binary = resolve_binary(self._cfg.opencode_binary)
+            binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return _failure("none", "binary_unavailable")
         # An external-evidence run must NOT skip review-reference resolution.
@@ -1206,7 +1206,7 @@ class OpenCodeRunner:
         )
 
         try:
-            binary = resolve_binary(self._cfg.opencode_binary)
+            binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return _failure(combined_sha_prompt, "binary_unavailable")
         # Bounded stdin (finding B10): fail closed before spawning anything.
@@ -1549,7 +1549,7 @@ class OpenCodeRunner:
                 f"LATEST QUESTION:\n{question}"
             )
             try:
-                binary = resolve_binary(self._cfg.opencode_binary)
+                binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
             except Exception:  # noqa: BLE001 - config/bootstrap boundary
                 return _review_failure("binary_unavailable", sha=provenance)
             # Bounded stdin: fail closed before spawning anything.
