@@ -1015,7 +1015,7 @@ class OpenCodeRunner:
             '{"summary":"factual summary","sources":["https://..."]}. '
             "Every source must be a URL you actually retrieved. Never invent one."
         )
-        steps = min(8, max(1, int(self._cfg.opencode_steps)))
+        steps = max(1, int(self._cfg.opencode_steps))
         agent_document = build_research_agent(
             self._cfg.opencode_model, system, steps=steps
         )
