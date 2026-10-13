@@ -262,6 +262,9 @@ def _script(tmp_path, behavior="success"):
     ).replace("__SESSION__", SESSION)
     body = f'''#!{sys.executable}
 import json, os, sys, time
+if sys.argv[1:] == ["--version"]:
+    print("opencode 2.0.5")
+    sys.exit(0)
 trace = {str(trace)!r}
 with open(trace, "w", encoding="utf-8") as handle:
     json.dump({{"argv": sys.argv[1:], "stdin": sys.stdin.read(),
@@ -1281,6 +1284,9 @@ def _reading_script(tmp_path: Path, filename: str) -> Path:
     """
     body = f'''#!{sys.executable}
 import json, os, sqlite3, sys
+if sys.argv[1:] == ["--version"]:
+    print("opencode 2.0.5")
+    sys.exit(0)
 head_dir = os.getcwd()
 stdin = sys.stdin.read()
 base_dir = ""

@@ -1062,6 +1062,9 @@ def _spam_opencode_script(
 
     body = f"""#!{sys.executable}
 import json, os, sqlite3, sys
+if sys.argv[1:] == ["--version"]:
+    print("opencode 2.0.5")
+    sys.exit(0)
 for event in {stream!r}:
     print(json.dumps(event))
 data_home = os.environ.get("XDG_DATA_HOME")

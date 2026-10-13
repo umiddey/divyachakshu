@@ -148,6 +148,9 @@ def _create_mock_opencode(tmp_path: Path, mutate_repo: Path | None = None) -> Pa
 
     body = f"""#!{sys.executable}
 import json, os, sqlite3, sys
+if sys.argv[1:] == ["--version"]:
+    print("opencode 2.0.5")
+    sys.exit(0)
 {mutate_snippet}
 part = {{"id": "p2", "messageID": "msg-1", "sessionID": "sess-multi",
         "type": "text", "text": "[[OI_FINAL_ANSWER]]\\nMulti-repo audit completed",

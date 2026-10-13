@@ -137,6 +137,9 @@ def _fake_opencode(tmp_path: Path, name: str = "fake-opencode") -> tuple[Path, P
     trace = tmp_path / f"{name}-trace.json"
     body = f'''#!{sys.executable}
 import json, os, sqlite3, sys
+if sys.argv[1:] == ["--version"]:
+    print("opencode 2.0.5")
+    sys.exit(0)
 trace = {str(trace)!r}
 with open(trace, "w", encoding="utf-8") as handle:
     json.dump({{"argv": sys.argv[1:], "stdin": sys.stdin.read(),

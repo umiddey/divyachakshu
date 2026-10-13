@@ -87,6 +87,9 @@ def _external_script(tmp_path: Path) -> tuple[Path, Path]:
     trace = tmp_path / "external-trace.json"
     body = f'''#!{sys.executable}
 import json, os, sqlite3, sys
+if sys.argv[1:] == ["--version"]:
+    print("opencode 2.0.5")
+    sys.exit(0)
 argv = sys.argv[1:]
 real_run = not any("__schema_init__" in a for a in argv)
 if real_run:
