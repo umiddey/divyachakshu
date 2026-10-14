@@ -127,6 +127,11 @@ _LIMITATION_REPLIES = {
         "I can't look that up: it refers to private conversation content, and "
         "I only fetch public sources. Name a public topic or URL instead."
     ),
+    "classifier_unavailable": (
+        "I couldn't decide whether this needs web research (the classifier is "
+        "unavailable right now), so I'm not answering from memory. Use "
+        "!search <topic> and I'll look it up on the web."
+    ),
 }
 
 
@@ -883,6 +888,15 @@ class OIWatcher(discord.Client):
             prepared.refusal = decision.refusal
             if prepared.inputs.has_external_content:
                 prepared.inputs.notes.append(limitation_note(decision.refusal))
+            return (), False
+        if decision.classifier_failure:
+            # The classifier could not decide, even after its strict-JSON
+            # retry. Never answer the public part silently from repository
+            # knowledge: record the explicit failure so the reply tells the
+            # user web research could not be decided and to use !search.
+            prepared.research_failure = "classifier_unavailable"
+            if prepared.inputs.has_external_content:
+                prepared.inputs.notes.append(limitation_note(prepared.research_failure))
             return (), False
         if not decision.research:
             return (), False

@@ -88,6 +88,10 @@ _LIMITATION_NOTES = {
     REFUSAL_PRIVATE: (
         "private referential request; the public lookup was refused"
     ),
+    "classifier_unavailable": (
+        "web research could not be decided (classifier unavailable); the "
+        "public part was not answered from memory"
+    ),
 }
 
 

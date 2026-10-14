@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import re
 import tempfile
 from dataclasses import dataclass
@@ -24,8 +25,12 @@ from .intent import (
     PublicRefusal,
     PublicRequest,
     extract_public_request,
+    is_plain_web_search,
+    plain_web_search_refusal,
 )
 from .records import EvidenceItem, PreparedInputs
+
+logger = logging.getLogger(__name__)
 
 # Discord message flag: suppress link embeds (1 << 2).
 SUPPRESS_EMBEDS = 4
@@ -65,6 +70,16 @@ FORMAT_REMINDER = (
     "user-facing answer and nothing before the marker."
 )
 
+# Appended after the user message for the classifier's single retry when the
+# first reply carried no usable JSON decision (narration, a denied-tool
+# step-limit message, or nothing at all).
+CLASSIFIER_RETRY_REMINDER = (
+    "Your previous reply was not the required JSON object. Reply again with "
+    "exactly one JSON object and nothing else: "
+    '{"research": true or false, "query": "short public query or empty"}. '
+    "No narration, no tool attempts, no markdown."
+)
+
 Complete = Callable[[str], Awaitable[str | None]]
 
 
@@ -76,6 +91,7 @@ class ResearchDecision:
     query: str
     forced: bool = False
     refusal: str | None = None
+    classifier_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -107,10 +123,10 @@ def command_decision(message: str, *, enabled: bool) -> ResearchDecision | None:
     return ResearchDecision(False, "", forced=True, refusal=REFUSAL_AMBIGUOUS)
 
 
-def parse_classifier_output(raw: str | None) -> ResearchDecision:
-    """Parse a tool-free classifier reply. Garbage is research=false."""
+def _classifier_payload(raw: str | None) -> dict | None:
+    """Return the classifier's JSON object, or None when the reply has none."""
     if not raw:
-        return ResearchDecision(False, "")
+        return None
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -119,12 +135,26 @@ def parse_classifier_output(raw: str | None) -> ResearchDecision:
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
-        return ResearchDecision(False, "")
+        return None
     try:
         payload = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        return ResearchDecision(False, "")
-    if not isinstance(payload, dict) or payload.get("research") is not True:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def parse_classifier_output(raw: str | None) -> ResearchDecision:
+    """Parse a tool-free classifier reply into a bounded decision.
+
+    ``classifier_failure`` is True exactly when the reply carries no usable
+    decision (empty, narration, or malformed JSON): the caller retries once
+    with a strict-JSON reminder and otherwise fails the decision explicitly,
+    never silently treating garbage as research=false.
+    """
+    payload = _classifier_payload(raw)
+    if payload is None:
+        return ResearchDecision(False, "", classifier_failure=True)
+    if payload.get("research") is not True:
         return ResearchDecision(False, "")
     query = payload.get("query")
     if not isinstance(query, str):
@@ -179,22 +209,68 @@ async def decide_research(
     complete: Complete,
     history_urls: Iterable[str] = (),
 ) -> ResearchDecision:
-    """Decide research from a forced command, history links, or one classifier call.
+    """Decide research deterministically when possible, else one classifier call.
 
     ``external_inputs`` disabled never calls ``complete`` and never researches.
-    Forced commands never call it either. A message that refers to links
+    Forced commands never call it either. An explicit plain-language web-search
+    request (``search the internet ...``, ``google ...``, ``look up ...
+    online``) forces research with the whole message as the brief — or refuses
+    honestly for a private-referential or repository-internal subject — and
+    also never calls the classifier. A message that refers to links
     (``link``/``links``/``url``/``urls``, any case, including German
     ``Link``/``Links``) with a non-empty public history is forced research
-    and does not call the classifier.
+    too. The classifier answers only ambiguous messages; an unusable verdict
+    is retried once with a strict-JSON reminder, and if it still fails the
+    decision carries ``classifier_failure`` so the caller never silently
+    answers without research.
     """
+    decision = await _resolve_research(
+        message,
+        enabled=enabled,
+        complete=complete,
+        history_urls=history_urls,
+    )
+    # One INFO line per decision. Never the message text.
+    logger.info(
+        "[research] research decision research=%s forced=%s classifier_failure=%s",
+        decision.research,
+        decision.forced,
+        decision.classifier_failure,
+    )
+    return decision
+
+
+async def _resolve_research(
+    message: str,
+    *,
+    enabled: bool,
+    complete: Complete,
+    history_urls: Iterable[str] = (),
+) -> ResearchDecision:
+    """Resolve the decision before the per-decision log line in decide_research."""
     forced = command_decision(message, enabled=enabled)
     if forced is not None:
         return forced
+    if is_plain_web_search(message):
+        if not enabled:
+            return ResearchDecision(False, "", forced=True, refusal=REFUSAL_DISABLED)
+        refusal = plain_web_search_refusal(message)
+        if refusal is not None:
+            return ResearchDecision(False, "", forced=True, refusal=refusal)
+        return ResearchDecision(True, (message or "").strip(), forced=True)
     if not enabled:
         return ResearchDecision(False, "")
     if history_urls and _LINK_REF_RE.search(message or ""):
         return ResearchDecision(True, (message or "").strip(), forced=True)
-    return parse_classifier_output(await complete(message))
+    prompt = message or ""
+    decision = parse_classifier_output(await complete(prompt))
+    if decision.classifier_failure:
+        decision = parse_classifier_output(
+            await complete(f"{prompt}\n\n{CLASSIFIER_RETRY_REMINDER}")
+        )
+    if decision.classifier_failure:
+        return ResearchDecision(False, "", classifier_failure=True)
+    return decision
 
 
 def _host_blocked(host: str) -> bool:

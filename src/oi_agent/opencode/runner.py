@@ -880,6 +880,7 @@ class OpenCodeRunner:
         *,
         system_prompt: str = "",
         timeout: int = 60,
+        steps: int = 1,
     ) -> str | None:
         """Execute a raw model query with no tools at all.
 
@@ -891,6 +892,9 @@ class OpenCodeRunner:
         Args:
             system_prompt: Optional override for the default JSON instruction.
             timeout: Wall-clock bound in seconds.
+            steps: Agent step budget. One step suffices for a direct JSON
+                answer; callers that may need a step after a denied tool
+                attempt (the web classifier) pass a larger bound.
 
         Raises:
             ValueError: When the prompt exceeds the bounded stdin limit.
@@ -912,6 +916,7 @@ class OpenCodeRunner:
         agent_document = build_tool_free_agent(
             self._cfg.opencode_model,
             system_prompt or "You are a helpful JSON analysis agent. Output valid JSON.",
+            steps=steps,
         )
         argv = [binary, *build_argv(self._cfg.opencode_model, "oi_eval")]
         environment = paths.environment()
@@ -973,12 +978,18 @@ class OpenCodeRunner:
                     task.cancel()
 
     async def classify_web_request(self, message: str) -> str | None:
-        """Classify one request with the configured model and no tools."""
+        """Classify one request with the configured model and no tools.
+
+        Every action is denied, so a denied tool attempt consumes a step;
+        steps=3 leaves the agent room to answer with the required JSON after
+        such an attempt instead of emitting step-limit narration.
+        """
         try:
             return await self.run_raw_prompt(
                 message,
                 system_prompt=CLASSIFIER_SYSTEM,
                 timeout=30,
+                steps=3,
             )
         except ValueError:
             return None

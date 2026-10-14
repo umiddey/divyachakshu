@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 
 from oi_agent.config import Config
+from oi_agent.external.intent import (
+    REFUSAL_AMBIGUOUS,
+    REFUSAL_DISABLED,
+    REFUSAL_PRIVATE,
+)
 from oi_agent.external.prepare import PreparedExternal
 from oi_agent.external.records import PreparedInputs
 from oi_agent.external.research import (
+    CLASSIFIER_RETRY_REMINDER,
     ResearchResult,
     decide_research,
     failure_text,
@@ -402,3 +409,279 @@ async def test_research_budget_and_prompt_scale_with_every_listed_url(monkeypatc
     )
     assert kept.ok is True
     assert seen["timeout"] == 90
+
+
+_CLASSIFIER_NARRATION = (
+    "**Maximum steps for this agent have been reached.** Tools are disabled "
+    "until the next user input, so I am responding with a text-only summary. "
+    "No web research was actually conducted."
+)
+
+
+@pytest.mark.asyncio
+async def test_unusable_classifier_narration_becomes_honest_limitation(
+    tmp_path, monkeypatch, caplog
+):
+    """Narration instead of JSON retries once, then fails honestly, never silently."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, decisions = _install_research_spies(
+        monkeypatch, watcher, classifier_payload=_CLASSIFIER_NARRATION
+    )
+    prepared = PreparedExternal()
+    with caplog.at_level(logging.INFO):
+        sources, researched = await watcher._apply_research(
+            prepared,
+            "Please find us potential leads, target the retail sector in the US",
+            [],
+        )
+    assert classifier_calls == [
+        "Please find us potential leads, target the retail sector in the US",
+        "Please find us potential leads, target the retail sector in the US\n\n"
+        + CLASSIFIER_RETRY_REMINDER,
+    ]
+    assert research_calls == []
+    assert researched is False
+    assert sources == ()
+    assert prepared.research_failure == "classifier_unavailable"
+    assert decisions[0].research is False
+    assert decisions[0].classifier_failure is True
+    decision_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "research decision" in record.getMessage()
+    ]
+    assert decision_lines, "the decision must be logged"
+    assert "research=False" in decision_lines[0]
+    assert "classifier_failure=True" in decision_lines[0]
+    assert "potential leads" not in decision_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_classifier_none_reply_becomes_honest_limitation(tmp_path, monkeypatch):
+    """A None classifier reply (timeout shape) retries once, then is honest."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, decisions = _install_research_spies(
+        monkeypatch, watcher, classifier_payload=None
+    )
+    prepared = PreparedExternal()
+    sources, researched = await watcher._apply_research(
+        prepared, "find us retail leads in the US", []
+    )
+    assert len(classifier_calls) == 2
+    assert research_calls == []
+    assert researched is False
+    assert sources == ()
+    assert prepared.research_failure == "classifier_unavailable"
+    assert decisions[0].classifier_failure is True
+
+
+@pytest.mark.asyncio
+async def test_classifier_retry_once_recovers_research(tmp_path, monkeypatch):
+    """One strict-JSON retry recovers a usable verdict and research runs."""
+    watcher = _research_watcher(tmp_path)
+    calls: list[str] = []
+    research_calls: list[dict] = []
+
+    async def classify(message: str) -> str | None:
+        calls.append(message)
+        if len(calls) == 1:
+            return _CLASSIFIER_NARRATION
+        return '{"research": true, "query": "retail sector leads US"}'
+
+    async def research(query, urls, *, max_sources, timeout=None):
+        research_calls.append({"query": query})
+        return ResearchResult(True, summary="fetched", sources=("https://example.com",))
+
+    monkeypatch.setattr(watcher._runner, "classify_web_request", classify)
+    monkeypatch.setattr(watcher._runner, "run_web_research", research)
+    prepared = PreparedExternal()
+    sources, researched = await watcher._apply_research(
+        prepared, "find us retail leads", []
+    )
+    assert len(calls) == 2
+    assert researched is True
+    assert research_calls[0]["query"] == "retail sector leads US"
+
+
+@pytest.mark.asyncio
+async def test_valid_false_verdict_does_not_retry(tmp_path, monkeypatch):
+    """A parseable research=false verdict is final: one call, no failure flag."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, decisions = _install_research_spies(
+        monkeypatch, watcher, classifier_payload='{"research": false, "query": ""}'
+    )
+    prepared = PreparedExternal()
+    sources, researched = await watcher._apply_research(
+        prepared, "what does invoice_service do", []
+    )
+    assert classifier_calls == ["what does invoice_service do"]
+    assert prepared.research_failure is None
+    assert decisions[0].classifier_failure is False
+    assert researched is False
+
+
+# --- deterministic plain-language trigger (no classifier) --------------------
+
+
+_OWNER_LEAD_MESSAGE = (
+    "Please search the internet and find us potential leads, "
+    "target the retail sector in the US"
+)
+
+
+@pytest.mark.asyncio
+async def test_plain_language_web_request_forces_research_without_classifier():
+    """The exact missed owner message forces research; the classifier is silent."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": false, "query": ""}'
+
+    decision = await decide_research(
+        _OWNER_LEAD_MESSAGE, enabled=True, complete=complete
+    )
+    assert decision.research is True
+    assert decision.forced is True
+    assert decision.refusal is None
+    assert decision.classifier_failure is False
+    assert decision.query == _OWNER_LEAD_MESSAGE
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "google potential retail leads in the US",
+        "look up mechanical parts suppliers online",
+        "find us suppliers on the internet",
+        "research the retail sector online",
+        "search online for retail leads",
+        "SEARCH THE WEB for retail leads",
+        "look it up online",
+    ],
+)
+@pytest.mark.asyncio
+async def test_plain_language_variants_force_research_without_classifier(message):
+    """Every explicit plain-language phrasing forces research, none calls the model."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": false, "query": ""}'
+
+    decision = await decide_research(message, enabled=True, complete=complete)
+    assert decision.research is True
+    assert decision.forced is True
+    assert decision.query == message
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_plain_language_internal_subject_refuses_without_classifier():
+    """A repository-internal subject stays refused, exactly like !search refuses it."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": true, "query": "leaked"}'
+
+    decision = await decide_research(
+        "search the internet for this repo's tests", enabled=True, complete=complete
+    )
+    assert decision.research is False
+    assert decision.forced is True
+    assert decision.refusal == REFUSAL_AMBIGUOUS
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_plain_language_private_subject_refuses_without_classifier():
+    """A private-referential subject never becomes an outbound query."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": true, "query": "the token above"}'
+
+    decision = await decide_research(
+        "search the web for the token above", enabled=True, complete=complete
+    )
+    assert decision.research is False
+    assert decision.forced is True
+    assert decision.refusal == REFUSAL_PRIVATE
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_plain_language_request_when_disabled_refuses():
+    """Disabled mode answers an explicit web request with the honest refusal."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": true, "query": "x"}'
+
+    decision = await decide_research(
+        _OWNER_LEAD_MESSAGE, enabled=False, complete=complete
+    )
+    assert decision.research is False
+    assert decision.forced is True
+    assert decision.refusal == REFUSAL_DISABLED
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_owner_lead_message_runs_research_with_whole_message(
+    tmp_path, monkeypatch, caplog
+):
+    """End to end: the deterministic trigger researches the owner message itself."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, decisions = _install_research_spies(
+        monkeypatch, watcher, classifier_payload='{"research": false, "query": ""}'
+    )
+    prepared = PreparedExternal()
+    with caplog.at_level(logging.INFO):
+        sources, researched = await watcher._apply_research(
+            prepared, _OWNER_LEAD_MESSAGE, []
+        )
+    assert classifier_calls == []
+    assert researched is True
+    assert research_calls[0]["query"] == _OWNER_LEAD_MESSAGE
+    assert decisions[0].forced is True
+    decision_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "research decision" in record.getMessage()
+    ]
+    assert decision_lines, "the decision must be logged"
+    assert "research=True" in decision_lines[0]
+    assert "forced=True" in decision_lines[0]
+    assert "retail" not in decision_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_classifier_agent_gets_steps_to_answer_after_denied_tool(
+    tmp_path, monkeypatch
+):
+    """classify_web_request gives the tool-free agent room to answer (steps=3).
+
+    With every action denied, one denied tool attempt used to consume the only
+    step, so the classifier returned step-limit narration instead of JSON.
+    """
+    captured: dict = {}
+
+    def fake_build(model, prompt, *, steps=1):
+        captured["steps"] = steps
+        return {"agents": {}}
+
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    monkeypatch.setattr("oi_agent.opencode.runner.build_tool_free_agent", fake_build)
+    monkeypatch.setattr(
+        "oi_agent.opencode.runner.resolve_runtime_binary",
+        lambda binary, paths: "/nonexistent/oi-fake-binary",
+    )
+    runner = OpenCodeRunner(Config())
+    result = await runner.classify_web_request("what does invoice_service do")
+    assert result is None  # the fake binary never spawns; only the config is captured
+    assert captured["steps"] == 3

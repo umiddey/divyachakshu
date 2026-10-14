@@ -72,11 +72,34 @@ _FETCH_VERB_RE = re.compile(
 )
 
 # Explicit command form: `!news <topic>` / `!search <topic>` / `!fetch <url>`.
+# DOTALL: a multi-line argument ("!search suppliers\nfrom brand A") is one
+# command, and _clean_topic collapses the argument to a single-line query.
 _COMMAND_RE = re.compile(
-    r"^\s*!(?P<command>news|search|fetch|url|web)\b(?P<argument>.*)$", re.IGNORECASE
+    r"^\s*!(?P<command>news|search|fetch|url|web)\b(?P<argument>.*)$",
+    re.IGNORECASE | re.DOTALL,
 )
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+
+# Plain-language requests that explicitly name the public web as the place to
+# search ("search the internet and find us leads", "google X", "look up X
+# online", "find/research X on the internet/online"). They force research
+# without a classifier; the whole message (bot mention stripped) becomes the
+# research brief. "google" matches only in verb position: no host
+# ("google.com") and no product compound ("google docs", "google maps").
+_PLAIN_WEB_SEARCH_RE = re.compile(
+    r"\b(?:"
+    r"search\s+(?:the\s+)?(?:web|internet)\b"
+    r"|search\s+online\b"
+    r"|google\s+(?!docs\b|maps\b|drive\b|meet\b|play\b|cloud\b|chrome\b|"
+    r"scholar\b|translate\b|calendar\b|photos\b|sheets?\b|forms?\b|"
+    r"analytics\b|workspace\b)\S"
+    r"|look\s+(?:this\s+|it\s+|that\s+|them\s+)?up\b[^.?!]*\bonline\b"
+    r"|find\b[^.?!]*\b(?:online|on\s+the\s+(?:internet|web))\b"
+    r"|research\b[^.?!]*\b(?:online|on\s+the\s+(?:internet|web))\b"
+    r")",
+    re.IGNORECASE,
+)
 
 # Phrases that prove the ask is explicitly about the public internet.
 _PUBLIC_MARKER_RE = re.compile(
@@ -248,6 +271,36 @@ def extract_public_request(message: str) -> PublicRequest | PublicRefusal | None
     if not (_PUBLIC_MARKER_RE.search(text) or _PUBLIC_MARKER_RE.search(topic)):
         return None
     return PublicRequest(kind=kind, value=topic, source=source)
+
+
+def is_plain_web_search(message: str) -> bool:
+    """Return True when the message explicitly asks for a public web search.
+
+    The deterministic plain-language counterpart of the ``!search`` command:
+    an explicit public-web target word (``internet``/``web``/``online``), the
+    verb ``google``, or ``look up``/``find``/``research`` tied to such a word.
+    Ordinary chat and repository asks (``search for the parse_config
+    function``) never match, so the classifier keeps deciding those.
+    """
+    if not isinstance(message, str):
+        return False
+    return bool(_PLAIN_WEB_SEARCH_RE.search(message))
+
+
+def plain_web_search_refusal(message: str) -> str | None:
+    """Refusal category for an explicit plain-language web-search request
+    that cannot be served honestly, or ``None`` when it is serviceable.
+
+    Mirrors the ``!search`` command contract: a repository-internal subject is
+    refused exactly as the command path refuses it today, and a
+    private-referential subject never becomes an outbound query.
+    """
+    text = (message or "").strip()
+    if _INTERNAL_ONLY_RE.search(text):
+        return REFUSAL_AMBIGUOUS
+    if _is_private_referential(text):
+        return REFUSAL_PRIVATE
+    return None
 
 
 def _from_command(name: str, argument: str) -> PublicRequest | PublicRefusal:
