@@ -24,6 +24,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from ..external.prepare import AttachmentCandidate
@@ -68,6 +69,142 @@ def context_attachments_requested(question: str) -> bool:
         _ATTACHMENT_NOUN_RE.search(question)
         and _CONTEXT_REFERENCE_RE.search(question)
     )
+
+
+AUTHOR_FOLLOW_UP_WINDOW_MINUTES = 15
+AUTHOR_FOLLOW_UP_MAX_MESSAGES = 3
+
+
+def _message_author_id(message: Any) -> int:
+    return int(getattr(getattr(message, "author", None), "id", 0) or 0)
+
+
+def _message_has_attachments(message: Any) -> bool:
+    return bool(getattr(message, "attachments", None))
+
+
+def _mentions_bot(message: Any, bot_user_id: int) -> bool:
+    if not bot_user_id:
+        return False
+    for member in getattr(message, "mentions", None) or ():
+        if int(getattr(member, "id", 0) or 0) == bot_user_id:
+            return True
+    return False
+
+
+def author_follow_up_attachment_messages(
+    *,
+    burst_messages: list[Any],
+    context_messages: list[Any],
+    reply_messages: list[Any] | None = None,
+    bot_user_id: int = 0,
+    window_minutes: int = AUTHOR_FOLLOW_UP_WINDOW_MINUTES,
+    max_prior_messages: int = AUTHOR_FOLLOW_UP_MAX_MESSAGES,
+) -> list[Any]:
+    """Return same-author history messages whose attachments follow a bare mention.
+
+    When the trigger is a bot mention with no attachment and no reply thread,
+    the author's own recent attachment message(s) in the rendered history
+    window are eligible. Other authors' files are never pulled here.
+    """
+    if reply_messages:
+        return []
+    if not burst_messages or not bot_user_id:
+        return []
+    trigger = burst_messages[0]
+    if not _mentions_bot(trigger, bot_user_id):
+        return []
+    if _message_has_attachments(trigger):
+        return []
+    author_id = _message_author_id(trigger)
+    if not author_id:
+        return []
+    burst_ids = {int(getattr(message, "id", 0) or 0) for message in burst_messages}
+    trigger_time = getattr(trigger, "created_at", None)
+    if trigger_time is not None and trigger_time.tzinfo is None:
+        trigger_time = trigger_time.replace(tzinfo=timezone.utc)
+    window = timedelta(minutes=max(1, window_minutes))
+    picked: list[Any] = []
+    for message in reversed(context_messages or ()):
+        mid = int(getattr(message, "id", 0) or 0)
+        if not mid or mid in burst_ids:
+            continue
+        if _message_author_id(message) != author_id:
+            continue
+        if not _message_has_attachments(message):
+            continue
+        created = getattr(message, "created_at", None)
+        if trigger_time is not None and isinstance(created, datetime):
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = trigger_time - created
+            if age < timedelta(0) or age > window:
+                continue
+        picked.append(message)
+        if len(picked) >= max(1, max_prior_messages):
+            break
+    picked.reverse()
+    return picked
+
+
+def history_messages_for_attachments(
+    *,
+    question: str,
+    burst_messages: list[Any],
+    context_messages: list[Any],
+    reply_messages: list[Any] | None = None,
+    bot_user_id: int = 0,
+) -> list[Any]:
+    """Choose which rendered-history messages may contribute attachment candidates."""
+    if context_attachments_requested(question):
+        return list(context_messages or ())
+    follow_up = author_follow_up_attachment_messages(
+        burst_messages=burst_messages,
+        context_messages=context_messages,
+        reply_messages=reply_messages,
+        bot_user_id=bot_user_id,
+    )
+    return follow_up
+
+
+def unloaded_history_attachment_note(
+    *,
+    context_messages: list[Any],
+    burst_messages: list[Any],
+    loaded_source_message_ids: set[int],
+    bot_user_id: int = 0,
+) -> str | None:
+    """Return a controller note when history shows attachments the run did not load."""
+    if not context_messages or not burst_messages:
+        return None
+    trigger = burst_messages[0]
+    author_id = _message_author_id(trigger)
+    if not author_id or not _mentions_bot(trigger, bot_user_id):
+        return None
+    missing: list[str] = []
+    burst_ids = {int(getattr(message, "id", 0) or 0) for message in burst_messages}
+    for message in context_messages:
+        mid = int(getattr(message, "id", 0) or 0)
+        if not mid or mid in burst_ids:
+            continue
+        if _message_author_id(message) != author_id:
+            continue
+        if not _message_has_attachments(message):
+            continue
+        if mid in loaded_source_message_ids:
+            continue
+        for attachment in getattr(message, "attachments", None) or ():
+            name = str(getattr(attachment, "filename", "unnamed") or "unnamed")
+            missing.append(name)
+    if not missing:
+        return None
+    shown = ", ".join(sorted(set(missing))[:5])
+    return (
+        "thread history names attachment(s) the controller could not load for this "
+        f"run ({shown}); describe that limitation honestly and never ask the user "
+        "to save or copy files onto the host disk or repository paths"
+    )
+
 
 # Exact approved Discord CDN hosts. Anything else is refused before a socket
 # is opened, so an attachment URL is never a general-purpose fetch primitive.

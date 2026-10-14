@@ -440,6 +440,13 @@ EVIDENCE RULES FOR EXTERNAL RUNS:
 - Attached images, when present, arrive as real attached image files you can
   actually look at. Describe what is visible. If no images are attached, say
   you cannot see any image rather than inventing one.
+- When attached-file metadata marks an image unsupported because model image
+  capability is not enabled (image_inputs=off), say plainly that image/vision
+  input is disabled in OI configuration. Never invent host read-permission
+  problems, staging folders, or missing on-disk file copies to explain it.
+- If thread history names an attachment that is not listed under attached
+  files, say the controller could not load it. Never tell the user to save,
+  copy, or upload files onto the host disk or into a repository path.
 - Attached documents are supplied as extracted text. Quote and summarize that
   text; do not claim to have opened the original file, executed it, or
   rendered it.

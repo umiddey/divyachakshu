@@ -56,7 +56,12 @@ from ..reminders import (
     tomorrow_at,
 )
 from ..store import Store
-from .attachments import context_attachments_requested, gather_candidates
+from .attachments import (
+    context_attachments_requested,
+    gather_candidates,
+    history_messages_for_attachments,
+    unloaded_history_attachment_note,
+)
 from .context_request import ContextRequestMemory, bounded_window
 from .gate import Action, evaluate
 
@@ -853,6 +858,7 @@ class OIWatcher(discord.Client):
         context_messages: list[Any],
         reply_messages: list[Any],
         extraction_source: str | None = None,
+        bot_user_id: int = 0,
     ) -> PreparedExternal:
         """Prepare bounded external evidence for one request, or none.
 
@@ -870,11 +876,18 @@ class OIWatcher(discord.Client):
         """
         enabled = self._cfg.external_inputs == "read-only"
         candidates: list[AttachmentCandidate] = []
+        history: list[Any] = []
+        author_follow_up = False
         if enabled:
-            history = (
-                context_messages
-                if context_attachments_requested(question)
-                else []
+            history = history_messages_for_attachments(
+                question=question,
+                burst_messages=burst_messages,
+                context_messages=context_messages,
+                reply_messages=reply_messages,
+                bot_user_id=bot_user_id,
+            )
+            author_follow_up = bool(history) and not context_attachments_requested(
+                question
             )
             candidates = gather_candidates(
                 burst_messages=burst_messages,
@@ -888,11 +901,26 @@ class OIWatcher(discord.Client):
             evidence_items=self._cfg.max_external_evidence_items,
             max_attachments=self._cfg.max_attachments,
         )
+        if enabled:
+            loaded_sources = {
+                int(record.source_message_id)
+                for record in prepared.inputs.attachments
+                if record.is_usable
+            }
+            note = unloaded_history_attachment_note(
+                context_messages=context_messages,
+                burst_messages=burst_messages,
+                loaded_source_message_ids=loaded_sources,
+                bot_user_id=bot_user_id,
+            )
+            if note:
+                prepared.inputs.notes.append(note)
         logger.info(
             "[watcher] external prepared evidence=%d attachments=%d enabled=%s "
-            "context_history=%s",
+            "context_history=%s author_follow_up=%s",
             len(prepared.inputs.evidence), len(prepared.inputs.attachments), enabled,
-            bool(history) if enabled else False,
+            context_attachments_requested(question) if enabled else False,
+            author_follow_up if enabled else False,
         )
         return prepared
 
@@ -1579,6 +1607,7 @@ class OIWatcher(discord.Client):
                         extraction_source=_extraction_source(
                             prompt_content, command_bot_id
                         ),
+                        bot_user_id=command_bot_id,
                     )
                     source = _extraction_source(prompt_content, command_bot_id)
                     history_texts = [

@@ -1273,8 +1273,8 @@ class OpenCodeRunner:
             if str(Path(p).expanduser().resolve()) != str(root)
         ]
 
-        evidence_block = render_evidence_block(inputs)
         attachment_files = self._vision_attachments(prepared)
+        evidence_block = render_evidence_block(inputs)
         prompt = (
             f"From: {author}\n\n"
             f"THREAD CONTEXT:\n{excerpt or '(start of conversation)'}\n\n"
@@ -1759,6 +1759,9 @@ class OpenCodeRunner:
                 f"{_review_label(provider, number)} "
                 f"base {snapshot.base_sha} head {snapshot.head_sha}"
             )
+            review_attachment_files: list[Path] = []
+            if prepared is not None and prepared.inputs.has_external_content:
+                review_attachment_files = self._vision_attachments(prepared)
             prompt = (
                 f"From: {author}\n\n"
                 f"{_review_prompt_section(snapshot)}\n"
@@ -1810,7 +1813,7 @@ class OpenCodeRunner:
                 if copied == 0:
                     disposable.close()
                     return _review_failure("no_isolated_credentials", sha=provenance)
-                files = self._vision_attachments(prepared)
+                files = review_attachment_files
             try:
                 (
                     events, stderr_bytes, stderr_sample, returncode,

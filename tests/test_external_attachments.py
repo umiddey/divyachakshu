@@ -238,6 +238,18 @@ def _image_record():
     )
 
 
+def test_evidence_block_lists_demoted_images_when_image_inputs_off(tmp_path: Path) -> None:
+    from oi_agent.opencode.prompt import render_evidence_block
+
+    cfg = Config()
+    runner = OpenCodeRunner(cfg)
+    prepared = _prepared_with_image(tmp_path)
+    runner._vision_attachments(prepared)
+    block = render_evidence_block(prepared.inputs)
+    assert "image/unsupported" in block
+    assert "image_inputs=off" in block
+
+
 def test_nonvision_mode_attaches_no_pixels_and_demotes_images(tmp_path: Path) -> None:
     cfg = Config()
     assert cfg.image_inputs == "off", "off is the conservative default"
