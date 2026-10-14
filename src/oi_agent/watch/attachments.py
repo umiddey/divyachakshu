@@ -27,11 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from ..external.prepare import AttachmentCandidate
-from ..external.retrieval import (
-    MAX_RESPONSE_BYTES,
-    RetrievalError,
-    _validate_url,
-)
+from ..external.retrieval import RetrievalError, _validate_url
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +254,7 @@ async def fetch_attachment_bytes(url: str) -> bytes:
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(65536):
                     body.extend(chunk)
-                    if len(body) > min(MAX_ATTACHMENT_FETCH_BYTES, MAX_RESPONSE_BYTES):
+                    if len(body) > MAX_ATTACHMENT_FETCH_BYTES:
                         raise RetrievalError("attachment_too_large")
                 return bytes(body)
         except RetrievalError:

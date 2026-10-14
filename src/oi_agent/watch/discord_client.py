@@ -792,21 +792,52 @@ class OIWatcher(discord.Client):
                 messages.append(message)
         return messages
 
-    @staticmethod
-    def _same_scope_replies(messages: list[Any]) -> list[Any]:
+    async def _same_scope_replies(
+        self,
+        channel: discord.abc.Messageable,
+        messages: list[Any],
+    ) -> list[Any]:
         """Return referenced messages that live in the same authorized scope.
 
-        A referenced message is only usable when Discord already resolved it
-        in this channel/thread. A cross-channel reference is dropped rather
+        Gateway events may embed ``referenced_message``, but a refetched burst
+        trigger usually carries only ``reference``. Same-scope reply targets
+        are resolved with an authorized ``fetch_message`` so attachments on the
+        parent message are not lost. A cross-channel reference is dropped rather
         than fetched, so a mention of a message in an unwatched channel can
         never widen attachment access.
         """
         referenced: list[Any] = []
         seen: set[int] = set()
+        channel_id = int(getattr(channel, "id", 0) or 0)
         for message in messages:
             target = getattr(message, "referenced_message", None)
             if target is None:
-                continue
+                ref = getattr(message, "reference", None)
+                if ref is None:
+                    continue
+                ref_channel = int(getattr(ref, "channel_id", 0) or 0)
+                if ref_channel not in (0, channel_id):
+                    continue
+                ref_id = int(getattr(ref, "message_id", 0) or 0)
+                if not ref_id:
+                    continue
+                try:
+                    if hasattr(channel, "fetch_message"):
+                        target = await channel.fetch_message(ref_id)
+                    else:
+                        target = next(
+                            (
+                                item
+                                for item in getattr(channel, "_history", [])
+                                if int(getattr(item, "id", 0) or 0) == ref_id
+                            ),
+                            None,
+                        )
+                except Exception:
+                    logger.debug(
+                        "[watcher] could not resolve reply reference %s", ref_id
+                    )
+                    continue
             mid = int(getattr(target, "id", 0) or 0)
             if not mid or mid in seen:
                 continue
@@ -1491,7 +1522,7 @@ class OIWatcher(discord.Client):
             burst_messages = await self._authorized_burst_messages(
                 ch, source_message_ids, trigger_message
             )
-            reply_messages = self._same_scope_replies(burst_messages)
+            reply_messages = await self._same_scope_replies(ch, burst_messages)
             # Ground-truth self identity for the prompt: the display name the
             # bot actually posts under in this conversation (guild nickname
             # aware) plus its stable user id.
