@@ -1,427 +1,200 @@
 # OI Agent
 
-Standalone Discord repository auditor. OI watches configured channels and their
-threads, admits explicit requests, runs a native OpenCode `oi` agent against a
-local clone, and posts through Discord safety rails. There is no approval tier;
-safety is structural.
-
-## Runtime boundary
-
-```text
-gateway -> admission/debounce/single-flight -> OpenCode runner -> Poster
- OI                  OI                       harness       OI
-```
-
-OI owns Discord transport, allowlists, burst coalescing, concurrency, hourly
-caps, pause/resume, delivery, process isolation, and audit provenance. OpenCode
-owns provider connectors, authentication, model execution, repository
-exploration, context management, tools, and session compaction.
-
-OpenCode is required. OI has no custom provider HTTP client, fallback engine,
-tool loop, repository manifest, or skill integration.
-
-## Safety model
-
-- Only the final completed OpenCode assistant message is deliverable. Native
-  v2 emits no terminal step event for the final answer, so completion is
-  proven from OpenCode's own database state (the exact assistant message
-  recorded with `finish=stop` and a later successful idle outcome for the
-  same session); anything unproven fails closed with a bounded error class.
-  Intermediate narration, reasoning, and partial assistant steps never reach
-  the outbox or Discord, and reply truncation preserves the provenance footer.
-- Git remotes remain read-scoped. OI may run
-  `git pull --ff-only --autostash` to refresh a watched clone; OpenCode cannot
-  edit source files or execute shell commands.
-- Each run supplies an inline native v2 `agents.oi` configuration. A broad
-  deny-all comes first (it overrides OpenCode v2's allow-by-default base policy
-  and also constrains hidden maintenance agents), then only narrow re-grants:
-  repository-scoped `read` and `glob` inside the watched root. `shell`,
-  `subagent`, `skill`, `question`, `webfetch`, `websearch`, `execute`, `edit`,
-  and every `external_directory` are denied. OpenCode v1 and unknown future
-  major versions are rejected outright: their permission schemas differ and OI
-  never runs under ignored policy.
-- Automatic snapshot and formatter side paths are switched off (`snapshot`,
-  `formatter`), so a read-only audit never mutates the repository.
-- `.git`, `.env*`, private keys, certificates, credentials, and known secret
-  files are denied even inside the repository.
-- Watched-repository `opencode.json` and `.opencode/` configuration are disabled
-  with `OPENCODE_DISABLE_PROJECT_CONFIG=1`.
-- OI uses isolated OpenCode HOME/XDG roots. It never imports the operator's
-  personal OpenCode config, plugins, MCP servers, agents, or credentials.
-- Poster delivery is restricted to configured channels and their threads, has
-  an atomic per-channel hourly cap, and honors the global `oi pause` switch.
-- Logs contain bounded metadata only: no prompts, repository evidence, replies,
-  reasoning, credentials, or raw OpenCode events.
-
-## Merge request reviews
-
-An explicit `MR 188` / `!188` (GitLab) or `PR 188` / `pull request 188`
-(GitHub) reference, or a canonical merge-request URL, in the latest request
-triggers a read-only merge-request audit instead of the watched-checkout
-audit. Bare numbers (`188`) and `#188`-style references are deliberately
-treated as ordinary text: only the explicit forms above trigger a review.
-
-- References resolve only against configured watched repositories. A bare
-  number must match exactly one of them; ambiguous, unavailable, unsupported,
-  or malformed references fail with an actionable message and never fall back
-  to auditing the current branch.
-- Controller-side MR fetching is read-only (`ls-remote` and `fetch` on
-  provider-owned refs, then bounded `ls-tree`, `cat-file`, and `diff`) and
-  limited to the configured repository's `origin`. It verifies the base/head
-  relationship and materializes temporary read-only base/head snapshots.
-- The model receives only those snapshot directories through the existing
-  read-only file tools. Permissions remain read-only file inspection with no
-  Git, shell, web, MCP, or credential access; `.git` and secret files stay
-  denied.
-- Review provenance carries the exact full base and head SHAs, e.g.
-  `MR !188 base <sha> head <sha>`, and survives reply truncation. Review runs
-  never resume or store conversation sessions.
-- Temporary snapshots and object repositories are removed after every run —
-  success, failure, timeout, or cancellation — and are never persisted.
-
-## External inputs: web, news, files, and images
-
-OI can answer questions that need public internet information, and it can
-read attached files. The feature is **off by default**. When it is on, OI
-splits the work into two OpenCode runs:
-
-1. A tool-free classifier (the configured model, no tools) decides whether
-   the current request needs research. `!search`, `!news`, `!fetch`, and
-   `!web` are forced yes. `external_inputs = "disabled"` never researches
-   and never calls the classifier.
-2. A separate research run, in a fresh empty directory and an isolated home,
-   may use only `websearch` and `webfetch`. It sees the request text plus
-   public http(s) URLs from that request and from recent channel messages.
-   Private, loopback, and `file:` URLs are dropped. It does not see the
-   repository, channel history, or OI secrets.
-3. The existing answer session keeps the normal policy (web tools denied)
-   and receives the research summary as a bounded untrusted-evidence block.
-
-Before a research answer is posted, any URL that is not in the research
-source list or the user's own message is removed. Replies that still contain
-links are posted with Discord link embeds suppressed.
-
-### Capability switches
-
-```bash
-oi config set external_inputs read-only   # disabled | read-only (disabled is the default)
-oi config set image_inputs on             # off | on (off is the default)
-oi config set max_external_evidence_items 8    # 1..50
-oi config set max_attachments 4                # 0..16
-oi config set max_attachment_bytes 8388608     # up to 32 MiB per attachment
-```
-
-`external_inputs = "disabled"` is the conservative shipped default: explicit
-commands then get an honest capability limitation, the classifier is not
-called, and ordinary repository behavior is unchanged.
-`image_inputs = "on"` states that the configured native model can actually see
-images. With `"off"`, images are described as metadata only.
-
-### Attachments
-
-- **Attachments**: plain UTF-8 text/Markdown/CSV/JSON, PDF, and DOCX files are
-  actually parsed into bounded evidence text; PNG/JPEG/WebP/GIF images are
-  passed as real image files when `image_inputs = "on"`. Scanned or empty PDFs
-  honestly report that no text was extractable. Lying MIME types and
-  extensions are detected from the real bytes; unsupported file types stay
-  attachable as metadata but are never fabricated.
-
-### What is refused
-
-- Private-referential commands (`!search the token above`) and bare commands
-  with no topic fail honestly instead of auditing the repository. The
-  research run receives public http(s) URLs from the current request and
-  recent channel messages, never private or file URLs, and never channel
-  history text.
-- Every download enforces the operator caps on actual bytes (declared sizes
-  are not trusted), aggregate limits, and an approved HTTPS CDN host list for
-  Discord attachments, with no redirects and no signed URLs in evidence or
-  logs.
-
-### Privacy
-
-- External runs are always read-only regardless of `write_mode`, never resume
-  or store conversation sessions, and run against **disposable native storage**
-  (private HOME/XDG/TMPDIR roots that are deleted afterwards, including any
-  bytes the harness persists).
-- Only minimal credential rows are copied from OI's already-isolated native
-  database into the disposable root — never personal auth, sessions, projects,
-  or evidence tables. Attachment and evidence bodies live in memory or
-  job-private temp files for one run only and are never written to OI's
-  database or logs.
+OI ("ultron" on Discord) is a standalone bot that watches configured Discord
+channels or whole guilds, answers only when explicitly triggered, and runs a
+read-only audit of local git clones through [OpenCode](https://opencode.ai).
+OI owns Discord transport, allowlists, rate caps, and delivery; OpenCode owns
+model, tools, and repository exploration. With `external_inputs = "read-only"`
+it also does public web research in an isolated second run.
 
 ## Quick start
 
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and a supported
+OpenCode release (`opencode --version`).
+
 ```bash
 uv sync --dev
-opencode --version
-opencode auth login --standalone
-
-oi init --model provider/model
-# Interactive init asks for Discord token, tone, and watched repositories.
-oi run
-oi pause
-oi resume
+opencode auth login --standalone    # provider credentials for OpenCode
+oi init --model provider/model      # interactive: token, personality, watches
+oi run                              # foreground run
 ```
 
-If OpenCode is missing, interactive `oi init` asks for installation consent.
-Non-interactive setup must use `oi init --install-opencode --model provider/model`
-or install OpenCode first. Installation uses a fixed available package-manager
-command and verifies `opencode --version` afterward. Declining installation
-aborts setup; it never creates a degraded configuration.
+- `oi init` writes `~/.config/oi/config.toml` and stores the Discord token as
+  the environment variable named by `discord_token_env` (default
+  `OI_DISCORD_TOKEN`) in `~/.config/oi/secrets.env`, mode 0600. The token
+  value never appears in the config file or `oi config show`.
+- Non-interactive: `oi init --install-opencode --model provider/model` also
+  installs OpenCode through a fixed package-manager command (`npm install
+  --global opencode-ai`, brew, or `mise use --global npm:opencode-ai`) and
+  verifies `opencode --version`; declining installation aborts setup.
+  `oi init --environment-mode workstation|server` and `oi init
+  --install-daemon` (dedicated unprivileged user plus hardened systemd system
+  unit) cover server setups.
+- Other commands: `oi pause` / `oi resume` (global posting switch), `oi
+  doctor` (preflight: OpenCode binary, model id, repos, token, state), `oi
+  queue status|retry|purge`, `oi session list|forget`, `oi memory status`.
 
-OpenCode credentials stay in its isolated credential store. OI's `.env` stores
-only the configured Discord token environment variable and is mode `0600`.
+### systemd user service
 
-How OI checks OpenCode (doctor, init): every bootstrap subcommand runs with
-`--standalone` and a bounded timeout, so it never connects to a shared
-`opencode serve --service` on the managed port. Authentication is read from
-the isolated credential store, counting rows not explicitly deactivated
-(`active != 0`; the native runtime inserts rows without the flag and does not
-filter on it). The model id itself is checked against `opencode models`. That
-listing can legitimately be empty — in that case a credentialed provider is
-reported as `model <id> not verified against OpenCode's model list; provider
-credential present` (a warning, not a failure), and `oi init` without
-`--model` asks for an explicit model instead of guessing.
+This checkout runs as a user service: `~/.config/systemd/user/oi.service`
+executes `oi run --config ~/.config/oi/config.toml` with `Restart=always`
+(`RestartSec=10`) and a drop-in `oi.service.d/mise-trust.conf` carrying the
+mise environment:
 
-## Config sketch
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now oi.service
+systemctl --user restart oi.service
+journalctl --user -u oi.service -f        # follow logs
+```
+
+### Minimal config
 
 ```toml
 discord_token_env = "OI_DISCORD_TOKEN"
-db_path = "~/.local/state/oi/state.db"
-personality = "A sharp, witty senior engineer. Dry humor, opinionated, direct."
-max_reply_chars = 2000
-reply_delivery = "chunked"
-opencode_binary = "opencode"
-opencode_model = "provider/model"
-opencode_steps = 30
-opencode_timeout_seconds = 900
-environment_mode = "workstation"
-max_session_turns = 30
-session_ttl_days = 7
+opencode_model = "provider/model"      # the model you authenticated in OpenCode
 
-# External inputs. disabled never researches. read-only uses a separate
-# OpenCode research run; the answer session still has web tools denied.
-external_inputs = "disabled"        # "disabled" | "read-only"
-image_inputs = "off"                # "off" | "on"
-max_external_evidence_items = 8
-max_attachments = 4
-max_attachment_bytes = 8388608
-
-# 1. Channel-specific watch auditing multiple repositories:
 [[watch]]
-channel_id = 123456789012345678
-repos = [
-  "/srv/repos/backend-erp",
-  "/srv/repos/contractor-portal"
-]
-bot_user_id = 345678901234567890
-post_hourly_cap = 5
-
-# 2. Server-wide (guild) watch with noise channel exclusions:
-[[watch]]
-guild_id = 987654321098765432
-ignored_channels = [111111111111111111, 222222222222222222]
-repos = ["/srv/repos/backend-erp"]
-bot_user_id = 345678901234567890
+channel_id = 123456789012345678        # or: guild_id = ... for a whole server
+repos = ["/srv/repos/backend"]
+bot_user_id = 345678901234567890       # the bot's own Discord user id
 post_hourly_cap = 3
 ```
 
-Use `oi config set <key> <value>`, `oi config watch-add --channel-id ... --repos ...`,
-`oi config watch-add --guild-id ... --repos ... --ignored-channels ...`, and
-`oi config watch-remove <channel_or_guild_id>`; writes are validated before an atomic replacement.
-Legacy provider sections, API keys, base URLs, fallback settings, tool-loop limits, and search
-vocabulary fail with a migration error. `oi config show` never prints credentials.
+## Configuration reference
 
-### Environment mode
+Edit with `oi config set KEY VALUE`, `oi config watch-add ...`, `oi config
+watch-remove ID`, `oi config show`. Writes are validated before an atomic
+replacement. Defaults:
 
-`environment_mode` selects the execution perspective and accepts exactly
-`workstation` or `server`:
+| Key | Default | Meaning |
+|---|---|---|
+| `discord_token_env` | `OI_DISCORD_TOKEN` | Name of the env var holding the Discord token. |
+| `db_path` | `~/.local/state/oi/state.db` | SQLite state (queue, sessions, memory). |
+| `personality` | teammate-style default | Persona text handed to the model. |
+| `max_reply_chars` | `2000` | Reply length cap. |
+| `reply_delivery` | `chunked` | `chunked` or `single_message` (must fit Discord's 2000-char limit). |
+| `opencode_binary` | `opencode` | Binary name or path; version-checked in isolation per run. |
+| `opencode_model` | `openai/gpt-4o-mini` | Model id passed to OpenCode. |
+| `opencode_steps` | `30` (max 50) | Step budget for answer runs; research adds one per fetched URL. |
+| `opencode_timeout_seconds` | `900` (max 86400) | Wall-clock cap per OpenCode run. |
+| `environment_mode` | `workstation` | `workstation` or `server`; legacy `auto` fails with a migration error. |
+| `write_mode` | `read-only` | `read-only`, or `docs-only` to allow edit access for documentation paths. |
+| `write_dirs` | `[]` | Directories `docs-only` may write; none usable means it refuses to widen. |
+| `max_session_turns` | `30` | Completed deliveries before a conversation session rotates. |
+| `session_ttl_days` | `7` | Idle days before rotation; `0` disables idle rotation only. |
+| `max_context_messages` | `200` (max 1000) | Bounded history window shown to the model. |
+| `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
+| `reminder_channel_id` | `0` | Channel that receives posted reminders (`0` = off). |
+| `external_inputs` | `disabled` | `disabled` or `read-only` (public web research; see below). |
+| `max_external_evidence_items` | `8` (1–50) | Cap on evidence items and research source links. |
+| `max_attachments` | `4` (0–16) | Attachments accepted per message. |
+| `max_attachment_bytes` | `8388608` (max 33554432) | Per-attachment byte cap. |
+| `image_inputs` | `off` | `off`, or `on` to pass images as real image files. |
+| `watches` | `[]` | `[[watch]]` entries: `channel_id` or `guild_id`, `repos`, `bot_user_id`, `post_hourly_cap` (default 3), `ignored_channels`, `allowed_channels`. |
 
-- `workstation` (default): OI runs interactively from a developer checkout.
-- `server`: OI runs as the hardened non-root daemon service. `oi init
-  --install-daemon` defaults to `server`; interactive `oi init` without daemon
-  installation defaults to `workstation`. Either value can be chosen explicitly
-  with `oi init --environment-mode workstation|server`.
+## Using the bot in Discord
 
-Configs written by older releases may still contain `environment_mode = "auto"`.
-Loading such a config fails with a migration error naming the exact repair
-command, and the repair itself is tolerated on the legacy file:
+A message is answered only when it **mentions the bot**, starts with `oi:`,
+or contains the marker `#oi`, `#audit`, or `#bugreport`. Everything else is
+ignored (log reason: `no explicit trigger`). Replies are capped at
+`max_reply_chars` and delivered chunked by default.
 
-```bash
-oi config set environment_mode server   # or: workstation
-oi config show
-```
+Conversation sessions are scoped to (conversation, repository) and rotate
+automatically after `max_session_turns` completed deliveries or
+`session_ttl_days` idle days.
 
-`oi config set environment_mode` validates against `workstation | server` and
-writes atomically; any other value is rejected.
+Commands (the command must be the leading token; multi-line arguments are one
+command):
 
-## Conversation sessions
+| Input | Effect |
+|---|---|
+| `!fresh` / `!new` | Starts a new session for this conversation; optionally after the bot mention. |
+| `!search <topic>` | Forces public web research on `<topic>`. |
+| `!news <topic>` | Same, framed as news lookup. |
+| `!web <topic>` | Alias of `!search`. |
+| `!fetch <url>` / `!url <url>` | Fetches and summarizes that public URL. |
+| plain phrases | "search the web/internet", "search online", "google X", "look up X online", "find/research X online or on the internet/web" also force research; the whole message becomes the query. |
 
-Messages must mention the bot, start with `oi:`, or contain `#oi`, `#audit`, or
-`#bugreport`. Ordinary chatter stays silent. A burst is coalesced into one
-latest-context request. Sessions are scoped to `(conversation, repository)`;
-threads have separate sessions from their parent and siblings.
+Research input also includes every public `http(s)` URL found in the request
+and in recent channel history when the message refers to links or URLs.
 
-By default, the next request starts a new OpenCode session once the stored
-session has **30 completed deliveries** or has been idle for **seven days**:
+What the refusal replies mean (the public part is never answered from
+repository memory):
 
-- One fully delivered response batch counts as one turn, regardless of chunk
-  count. Failed runs, incomplete delivery, and duplicate batch completion do not
-  add turns. A replacement session starts at one after its first completed delivery.
-- Idle age is measured from `updated_at`, the last successful completed delivery,
-  not session creation or the latest incoming message. Rotation occurs at
-  `turns >= max_session_turns` or `age >= session_ttl_days * 86400` seconds.
-- Automatic rotation adds a concise notice to the successful final reply.
-  A session mapping is stored only after successful OpenCode execution and
-  complete Discord delivery.
+- *"Public internet retrieval is disabled on this bot"* — `external_inputs`
+  is `disabled` (the default); set it to `read-only` to enable.
+- *"That looks like a public lookup, but it doesn't name a public topic or
+  URL"* — no usable subject; reply with a topic or URL.
+- *"I can't look that up: it refers to private conversation content"* — the
+  subject points at chat content ("the token above"); OI only fetches public
+  sources.
+- *"I couldn't decide whether this needs web research (the classifier is
+  unavailable right now)"* — see troubleshooting; `!search <topic>` bypasses
+  the classifier.
 
-Both limits are global configuration values. The turn cap must be a positive
-integer; TTL must be a nonnegative integer. Set TTL to `0` to disable idle-age
-rotation only (the turn cap still applies):
+Merge-request audits: `MR 188` or `!188` (GitLab), `PR 188` or
+`pull request 188` (GitHub), or a canonical merge-request URL triggers a
+read-only review instead of the checkout audit; bare numbers are ordinary
+text.
 
-```bash
-oi config set max_session_turns 30
-oi config set session_ttl_days 7
-oi config set session_ttl_days 0
-```
+## How web research works
 
-### Start fresh from Discord
+When `external_inputs = "read-only"`, each request goes through two OpenCode
+runs:
 
-Put `!fresh` or its alias `!new` first, optionally after the bot mention:
+1. A tool-free **classifier** (the configured model) decides whether the
+   request needs public research, answering one strict JSON object
+   (`{"research": bool, "query": str}`) with one retry. Forced inputs
+   (commands, plain web phrases, link references) skip it;
+   `disabled` mode never calls it.
+2. An isolated **research run** in an empty temporary directory and a
+   disposable home may use only `websearch` and `webfetch`. It sees the
+   question plus public `http(s)` URLs from the request and recent history —
+   never the repository, channel text, or OI credentials. Private, loopback,
+   and `file:` URLs are dropped.
 
-```text
-@OI !fresh Check the current API contract.
-@OI !new Why is this migration failing?
-!fresh @OI Audit the latest changes.
-```
+Limits: topic capped at 200 characters; step budget `opencode_steps` plus one
+per fetched URL; timeout 180 seconds plus 60 seconds per URL; research
+summary capped at 6000 characters; sources and evidence items bounded by
+`max_external_evidence_items` and a 12,000-character evidence budget. The
+answer session receives the summary as bounded untrusted evidence; any
+outbound link not in the research source list or the user's own message is
+replaced with `[link removed]` and embeds are suppressed.
 
-Use an actual Discord bot mention in place of `@OI`. The command must be a
-standalone leading token: `!freshness` and `please !fresh` do not reset a session.
-The command is stripped from the prompt input, not persisted as source content.
-It clears the scoped mapping and starts a new OpenCode session, even if the old
-session was still below its limits. Bounded current Discord context may still
-be included; this does not erase Discord history or behavioral memory, or change
-repository permissions. MR/PR reviews remain isolated and never resume or store
-conversation sessions, including when requested with `!fresh`.
+## Troubleshooting
 
-### Inspect or forget mappings
-
-```bash
-oi session list
-oi session list --conversation 123456789012345678
-oi session forget --conversation 123456789012345678 --repo /srv/repos/backend-erp
-oi session forget --conversation 123456789012345678 --all
-```
-
-`list` shows session metadata, including completed turns and the last-update
-time/idle age. `forget` requires `--conversation` and exactly one of `--repo` or
-`--all`. Here `--all` means **all repository mappings for that conversation**,
-never other conversations. Forgetting removes mappings only; it makes the next
-request start fresh without deleting Discord history or behavioral memory.
-`oi memory reset-*` and `oi memory prune` do not reset OpenCode sessions.
-
-## Durable delivery & queue management
-
-OI provides at-least-once message processing with crash and restart recovery:
-
-- **Durable job admission**: Admitted mention jobs are persisted to SQLite with
-  per-conversation FIFO leasing and atomic state transitions (`pending`, `leased`,
-  `done`, `dead`).
-- **Startup & reconnect reconciliation**: Scope cursors (`discord_scopes`) track the
-  highest seen message ID per channel and thread. Upon daemon startup or gateway
-  reconnect, OI queries backlog history to backfill and process missed mentions.
-- **Outbox deduplication & privacy**: Generated response chunks are recorded in
-  `outbound_chunks` with deterministic nonces and SHA-256 digests. Once Discord
-  confirms delivery, the batch is marked `done` and the chunk payload text is
-  immediately scrubbed (`body = NULL`). Source message bodies, thread evidence,
-  and prompts are never stored.
-- **Dead-letter visibility**: Permanently failing jobs or jobs exceeding retry
-  limits are moved to `dead` status.
-
-```bash
-oi queue status
-oi queue retry --all
-oi queue retry --id 123456789012345678
-oi queue purge --older-than-days 7
-```
-
-## Team dynamics and long-term memory (V2)
-
-OI maintains bounded, structured behavioral memory to adapt communication to individual
-teammates and team workflow across daemon restarts and OpenCode sessions:
-
-- **Privacy first**: OI never stores raw messages, chat transcripts, prompts, replies,
-  reasoning, or excerpts. Stored data consists exclusively of versioned, bounded,
-  validated structured signals.
-- **Scope isolation**: Every member profile is keyed by `(platform, scope_id, member_id)`.
-  Memory is never shared across different servers or scopes, and cross-team identity linking
-  is strictly prohibited.
-- **Retained fields**:
-  - **Member profile**: `directness` (bounded score), `detail_preference` (`brief | balanced | detailed`),
-    `challenge_preference` (`gentle | direct | adversarial`), `humor_preference` (`low | medium | high`),
-    `decision_style` (`options | recommendation | execution_first`), confidence, evidence count,
-    sanitized recurring topics, and timestamps.
-  - **Transient member state**: `energy` band (`low | steady | high | frustrated | unknown`),
-    current focus labels, `observed_at`, and automatic `expires_at` (hours/days).
-  - **Team pulse**: Focus labels, friction categories, momentum (`blocked | planning | building | debugging | shipping | celebrating | unknown`),
-    confidence, `observed_at`, and automatic `expires_at`.
-  - **Agent calibration**: Preferred verbosity band, directness band, formatting avoidances,
-    confidence, `updated_at`, and automatic `expires_at`.
-- **Prohibited inference categories**: Protected demographic traits, psychological or medical
-  diagnoses, employee evaluations, performance scoring, and cross-scope identity tracking
-  are strictly forbidden.
-- **Best-effort reflection**: Reflection runs asynchronously on a bounded background queue
-  only after confirmed delivery. Posting is never blocked. In a crash, reflection observations
-  may safely be lost; raw inputs are never retained for retries.
-- **Operator controls**:
-
-```bash
-oi memory status --scope 123456789012345678
-oi memory show --scope 123456789012345678 --member 234567890123456789
-oi memory reset-member --scope 123456789012345678 --member 234567890123456789
-oi memory reset-scope --scope 123456789012345678
-oi memory prune
-oi memory migrate-legacy --scope 123456789012345678
-oi memory purge-legacy
-```
-
-## Daemon installation
-
-```bash
-sudo oi daemon install
-sudo oi daemon status
-sudo oi daemon restart
-sudo oi daemon logs
-sudo -u oi -H oi doctor --config /home/oi/.config/oi/config.toml --user oi
-sudo oi daemon install --dry-run
-```
-
-Installation provisions a dedicated unprivileged `oi` user, copies only OI's
-config and Discord-token file, creates private OpenCode XDG roots, and renders a
-hardened systemd unit. OpenCode authentication must be performed for the
-service user; root's HOME and credential store are never used.
-
-The unit uses `ProtectSystem=strict`, `ProtectHome=read-only`,
-`NoNewPrivileges=true`, `PrivateTmp=true`, kernel/control-group restrictions,
-and narrow `ReadWritePaths` for OI state, isolated OpenCode state, and watched
-clones required by the existing read-scoped pull.
-
-## Operator cleanup after upgrade
-
-Older releases may have left `<repo>/.oi/index.md` and a `.oi/` entry in
-`.git/info/exclude`. They are obsolete. Inspect and remove them explicitly
-when convenient; ordinary daemon startup never deletes watched-repository files.
+- **Bot never replies** — the message had no explicit trigger. It must
+  mention the bot, start with `oi:`, or contain `#oi`, `#audit`, or
+  `#bugreport`; the log line shows `no explicit trigger`.
+- **`403` / "Missing Access" in logs** — the bot is not in the configured
+  guild (or lacks channel access). OI treats HTTP 401/403/404 as permanent
+  and does not retry: invite the bot and check its channel permissions.
+- **`No usable OpenCode ...` / binary errors** — the first `opencode` on
+  `PATH` is often a launcher shim (npx/mise, distro wrapper). OI
+  version-checks every candidate in its isolated environment and fails
+  naming each rejection. Install a supported release (`npm install --global
+  opencode-ai`, brew, or `mise use --global npm:opencode-ai`).
+- **Service can't find `oi` or `opencode` (mise)** — mise shims refuse to run
+  in untrusted directories: trust the checkout (`mise trust`) and keep the
+  `oi.service.d/mise-trust.conf` drop-in carrying the mise environment into
+  the user service (`systemctl --user cat oi.service` shows it).
+- **"classifier is unavailable" reply** — the decision model returned no
+  usable JSON verdict even after one retry, so the public part is left
+  unanswered rather than answered from memory. Retry, or force the lookup
+  with `!search <topic>`.
+- **Doctor warning** `model <id> not verified against OpenCode's model list;
+  provider credential present` — OpenCode returned an empty model listing;
+  a warning, not a failure; otherwise `oi doctor` must end in `all checks
+  passed`.
 
 ## Development
 
 ```bash
 uv sync --dev
-uv run pytest
-uv pip install -e . --force-reinstall --no-deps
+uv run pytest            # known baseline: 48 failures from a git-push fixture,
+                         # pre-existing and unrelated to documentation changes
+uv run ruff check .      # line length 120
+uv run python -c "import oi_agent"
 ```
 
-After any source change or checkout upgrade, reinstall the package with the
-command above before restarting `oi run` or the daemon; otherwise the installed
-entry point may still run the old build. Restart alone is not a package upgrade.
-For a daemon, reinstall into the environment that provides its `oi` executable.
