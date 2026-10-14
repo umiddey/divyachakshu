@@ -31,7 +31,11 @@ from oi_agent.external.research import (
 from oi_agent.opencode.native import DisposableNativeRoot
 from oi_agent.opencode.policy import build_research_permission_policy
 from oi_agent.opencode.prompt import FINAL_OUTPUT_MARKER
-from oi_agent.opencode.runner import OpenCodeRunner
+from oi_agent.opencode.runner import (
+    RESEARCH_BASE_TIMEOUT_SECONDS,
+    RESEARCH_PER_URL_TIMEOUT_SECONDS,
+    OpenCodeRunner,
+)
 from oi_agent.store import Store
 from oi_agent.watch.discord_client import OIWatcher
 
@@ -399,7 +403,8 @@ async def test_research_budget_and_prompt_scale_with_every_listed_url(monkeypatc
     result = await runner.run_web_research("read these", urls, max_sources=3)
     assert result.ok is True
     assert seen["steps"] == 7
-    assert seen["timeout"] == 180 + 60 * 3
+    assert seen["timeout"] == RESEARCH_BASE_TIMEOUT_SECONDS + RESEARCH_PER_URL_TIMEOUT_SECONDS * 3
+    assert seen["timeout"] > 180 + 60 * 3
     for text in (seen["system"], seen["prompt"]):
         assert "Webfetch every listed URL, one by one, then answer." in text
         assert "List each retrieved URL in sources." in text

@@ -79,6 +79,11 @@ MAX_STDERR_BYTES = 32 * 1024
 # before any subprocess is spawned.
 MAX_PROMPT_BYTES = 256 * 1024
 
+# Web research budget: a base for search + answer plus time per listed link.
+# 180 + 60/link timed out on a 2-link fact-check (2026-10-14 #co-founders).
+RESEARCH_BASE_TIMEOUT_SECONDS = 420
+RESEARCH_PER_URL_TIMEOUT_SECONDS = 120
+
 # One-shot spec extraction for chat-driven context expansion (plan
 # 20260920_chat_context_expansion). The model only interprets; the harness
 # fetches, clamped by config caps. Output contract: one JSON object, nothing
@@ -1037,7 +1042,7 @@ class OpenCodeRunner:
             "Every source must be a URL you actually retrieved. Never invent one."
         )
         if timeout is None:
-            timeout = 180 + 60 * len(urls)
+            timeout = RESEARCH_BASE_TIMEOUT_SECONDS + RESEARCH_PER_URL_TIMEOUT_SECONDS * len(urls)
         steps = max(1, int(self._cfg.opencode_steps)) + len(urls)
         agent_document = build_research_agent(
             self._cfg.opencode_model, system, steps=steps
