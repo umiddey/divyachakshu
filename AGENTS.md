@@ -67,6 +67,11 @@ uv pip install -e . --force-reinstall --no-deps
   specifics, credentials, or the substance of private discussions.
 - Never paste repository contents, config values, or evidence into external
   services. Assume anything sent out is cached and permanent.
+- Web search queries (owner 2026-10-19): the tool-free classifier may read the
+  current message plus the last ≤50 channel messages to infer what to search;
+  only its own short query (≤200 chars, private-referential check applied)
+  goes to the isolated research run. Raw messages, names, and bot-posted URLs
+  never do. The query is never logged.
 
 ## Team memory and reflection contract
 
