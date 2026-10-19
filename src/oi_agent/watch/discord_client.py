@@ -63,7 +63,7 @@ from .attachments import (
     unloaded_history_attachment_note,
 )
 from .context_request import ContextRequestMemory, bounded_window
-from .gate import Action, evaluate
+from .gate import Action, MentionedUser, evaluate
 
 logger = logging.getLogger(__name__)
 EXCERPT_LIMIT = 40
@@ -924,6 +924,58 @@ class OIWatcher(discord.Client):
         )
         return prepared
 
+    def _gate_own_names(self, channel) -> list[str]:
+        """Collect the names this bot can be called by in this channel."""
+        names: list[str] = []
+        user = self.user
+        if user is not None:
+            names.append(
+                str(
+                    getattr(user, "display_name", "")
+                    or getattr(user, "name", "")
+                    or ""
+                )
+            )
+            names.append(str(getattr(user, "name", "") or ""))
+        guild = getattr(channel, "guild", None)
+        member = getattr(guild, "me", None)
+        if member is not None:
+            names.append(str(getattr(member, "display_name", "") or ""))
+            nick = getattr(member, "nick", None)
+            if nick:
+                names.append(str(nick))
+        return [name for name in dict.fromkeys(names) if name]
+
+    @staticmethod
+    def _gate_mentioned_users(message) -> list[MentionedUser]:
+        """Resolve the other users Discord mentions in this message."""
+        users: list[MentionedUser] = []
+        for member in getattr(message, "mentions", None) or ():
+            name = str(
+                getattr(member, "display_name", None)
+                or getattr(member, "global_name", None)
+                or getattr(member, "name", None)
+                or ""
+            )
+            users.append(
+                MentionedUser(
+                    id=int(member.id),
+                    name=name,
+                    bot=bool(getattr(member, "bot", False)),
+                )
+            )
+        return users
+
+    @staticmethod
+    def _gate_reply_author_id(message) -> int | None:
+        """Return the replied-to message's author id when resolvable."""
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None)
+        if not isinstance(resolved, discord.Message):
+            return None
+        user_id = getattr(getattr(resolved, "author", None), "id", None)
+        return int(user_id) if user_id else None
+
     async def _apply_research(
         self,
         prepared: PreparedExternal,
@@ -1035,6 +1087,9 @@ class OIWatcher(discord.Client):
                     content=msg.content or "",
                     mention_ids=mention_ids,
                     bot_user_id=bot_user_id,
+                    bot_names=self._gate_own_names(channel),
+                    mentioned_users=self._gate_mentioned_users(msg),
+                    reply_to_user_id=self._gate_reply_author_id(msg),
                 )
                 if decision.action == Action.RESPOND:
                     if self._store.admit_mention_job(
@@ -1264,6 +1319,9 @@ class OIWatcher(discord.Client):
             content=message.content or "",
             mention_ids=mention_ids,
             bot_user_id=bot_user_id,
+            bot_names=self._gate_own_names(message.channel),
+            mentioned_users=self._gate_mentioned_users(message),
+            reply_to_user_id=self._gate_reply_author_id(message),
         )
         logger.info(
             "[watcher] %s %s in %s",
