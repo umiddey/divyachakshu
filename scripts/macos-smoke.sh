@@ -67,14 +67,19 @@ printf 'OI_DISCORD_TOKEN=fake-smoke-token\n' > "$HOME/.config/oi/.env"
 oi daemon install --user-mode --config "$CFG" || fail "daemon install failed"
 [ -f "$PLIST" ] || fail "plist missing at $PLIST"
 
-# The registered service must point at the private Python oi.
+# The registered service must run the real Python oi from the wrapper's
+# private uv tool dir (the plist stores the symlink-resolved venv binary
+# <private>/tools/divyachakshu/bin/oi), never the npm node shim.
 UID_N="$(id -u)"
 if ! launchctl print "gui/$UID_N/$LABEL" >"$TMPD/print.txt" 2>&1; then
   cat "$TMPD/print.txt" >&2
   fail "print gui/$UID_N/$LABEL failed"
 fi
-grep -qF "$PRIVATE_OI" "$TMPD/print.txt" \
-  || fail "LaunchAgent program is not the private Python oi"
+PRIVATE_VENV_OI="$HOME/Library/Application Support/oi-agent/npm/tools/divyachakshu/bin/oi"
+[ "$(realpath "$PRIVATE_OI")" = "$PRIVATE_VENV_OI" ] \
+  || fail "private oi symlink does not resolve to $PRIVATE_VENV_OI"
+grep -qF "$PRIVATE_VENV_OI" "$TMPD/print.txt" \
+  || { grep -n "program\|arguments" "$TMPD/print.txt" >&2; fail "LaunchAgent program is not the private Python oi"; }
 
 # launchd must have started it: wait up to ~60s for the log file.
 for _ in $(seq 1 30); do
