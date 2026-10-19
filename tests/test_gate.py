@@ -154,6 +154,75 @@ def test_reply_ping_naming_another_bot_is_ignored():
     assert d.reason == "addressed to another member"
 
 
+# --- rule d+: other known names from guild members and recent authors --------
+
+
+def test_reply_ping_calling_known_guild_bot_without_markup_is_ignored():
+    """A name call to a guild bot member only known via other_names redirects."""
+    d = evaluate(
+        "Dwight, what do you think?", [BOT_ID], BOT_ID,
+        reply_to_user_id=BOT_ID,
+        other_names=("Dwight",),
+    )
+    assert d.action == Action.IGNORE
+    assert d.reason == "addressed to another member"
+
+
+def test_reply_ping_without_call_responds_despite_other_names():
+    """Knowing other names never silences a neutral reply to us."""
+    d = evaluate(
+        "what do you think?", [BOT_ID], BOT_ID,
+        reply_to_user_id=BOT_ID,
+        other_names=("Dwight",),
+    )
+    assert d.action == Action.RESPOND
+    assert d.reason == "reply to bot"
+
+
+def test_own_markup_wins_over_other_names():
+    """Our written markup answers even when another known name is called."""
+    d = evaluate(
+        "<@99> and Dwight, coordinate the deploy", [BOT_ID], BOT_ID,
+        reply_to_user_id=BOT_ID,
+        other_names=("Dwight",),
+    )
+    assert d.action == Action.RESPOND
+    assert d.reason == "bot mentioned"
+
+
+def test_own_name_call_wins_over_other_names():
+    """Calling us by name answers even when other names are known."""
+    d = evaluate(
+        "Ultron, what do you think?", [BOT_ID], BOT_ID,
+        bot_names=OWN_NAMES,
+        reply_to_user_id=BOT_ID,
+        other_names=("Dwight",),
+    )
+    assert d.action == Action.RESPOND
+    assert d.reason == "bot named"
+
+
+def test_narration_about_other_name_keeps_reply_response():
+    """Talking ABOUT a known name is not addressing it."""
+    d = evaluate(
+        "Dwight said the deploy is done", [BOT_ID], BOT_ID,
+        reply_to_user_id=BOT_ID,
+        other_names=("Dwight",),
+    )
+    assert d.action == Action.RESPOND
+    assert d.reason == "reply to bot"
+
+
+def test_other_names_without_reply_ping_stay_ignorable():
+    """A non-reply message calling another known name has no trigger."""
+    d = evaluate(
+        "Dwight, what do you think?", [], BOT_ID,
+        other_names=("Dwight",),
+    )
+    assert d.action == Action.IGNORE
+    assert d.reason == "no explicit trigger"
+
+
 # --- rule e: everything else -------------------------------------------------
 
 

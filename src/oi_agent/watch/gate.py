@@ -106,6 +106,7 @@ def _addresses_other(
     content: str,
     bot_user_id: int,
     mentioned_users: Sequence[MentionedUser],
+    other_names: Sequence[str] = (),
 ) -> bool:
     """Return True when the content clearly addresses another member."""
     for match in _ANY_MENTION_RE.finditer(content):
@@ -113,6 +114,9 @@ def _addresses_other(
             return True
     for user in mentioned_users:
         if user.id != bot_user_id and _called_by_name(content, user.name):
+            return True
+    for name in other_names:
+        if _called_by_name(content, name):
             return True
     return False
 
@@ -125,6 +129,7 @@ def evaluate(
     bot_names: Sequence[str] = (),
     mentioned_users: Sequence[MentionedUser] = (),
     reply_to_user_id: int | None = None,
+    other_names: Sequence[str] = (),
 ) -> GateDecision:
     """Admit only messages that explicitly request OI's attention.
 
@@ -139,6 +144,10 @@ def evaluate(
         mentioned_users: The other users Discord resolved in the message.
         reply_to_user_id: Author id of the replied-to message when
             resolvable, else None.
+        other_names: Names of other known members/bots (guild bot members
+            and authors of recently loaded messages). Consulted only for a
+            bare reply ping: a direct call to one of them means the reply
+            addresses that member, not us.
 
     Returns:
         GateDecision with the action and its justification.
@@ -159,7 +168,7 @@ def evaluate(
         # to `mentions` without any markup, so check who was really
         # addressed before answering.
         if (reply_to_user_id is not None and reply_to_user_id != bot_user_id) or _addresses_other(
-            content, bot_user_id, mentioned_users
+            content, bot_user_id, mentioned_users, other_names
         ):
             return GateDecision(Action.IGNORE, "addressed to another member")
         return GateDecision(Action.RESPOND, "reply to bot")

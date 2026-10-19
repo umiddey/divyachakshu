@@ -18,7 +18,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import discord
 
@@ -69,6 +69,8 @@ from .gate import Action, MentionedUser, evaluate
 logger = logging.getLogger(__name__)
 EXCERPT_LIMIT = 40
 BURST_QUIET_SECONDS = 8.0
+# Upper bound on the names the addressee gate inspects for other members.
+_GATE_OTHER_NAMES_LIMIT = 32
 MAX_CONCURRENT_AUDITS_PER_CHANNEL = 2
 LEASE_DURATION_SECONDS = 60
 LEASE_RENEW_INTERVAL_SECONDS = 20
@@ -1001,6 +1003,52 @@ class OIWatcher(discord.Client):
         user_id = getattr(getattr(resolved, "author", None), "id", None)
         return int(user_id) if user_id else None
 
+    def _gate_other_names(
+        self,
+        channel,
+        bot_user_id: int,
+        recent: Sequence[Any] = (),
+    ) -> list[str]:
+        """Collect bounded names of other known members and bots.
+
+        Sources: bot members of the guild (``guild.members`` with ``bot``,
+        excluding ourselves) and the authors of the already-loaded recent
+        messages (excluding ourselves). A direct name call to one of them on
+        a bare reply ping means the reply addresses that member, not us.
+        """
+        names: list[str] = []
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            for member in getattr(guild, "members", None) or ():
+                if not bool(getattr(member, "bot", False)):
+                    continue
+                member_id = int(getattr(member, "id", 0) or 0)
+                if not member_id or member_id == bot_user_id:
+                    continue
+                name = str(
+                    getattr(member, "display_name", None)
+                    or getattr(member, "name", None)
+                    or ""
+                )
+                if name:
+                    names.append(name)
+        for message in recent:
+            author = getattr(message, "author", None)
+            if author is None or bool(getattr(author, "bot", False)):
+                continue
+            author_id = int(getattr(author, "id", 0) or 0)
+            if not author_id or author_id == bot_user_id:
+                continue
+            name = str(
+                getattr(author, "display_name", None)
+                or getattr(author, "global_name", None)
+                or getattr(author, "name", None)
+                or ""
+            )
+            if name:
+                names.append(name)
+        return list(dict.fromkeys(names))[:_GATE_OTHER_NAMES_LIMIT]
+
     async def _apply_research(
         self,
         prepared: PreparedExternal,
@@ -1149,6 +1197,7 @@ class OIWatcher(discord.Client):
                     bot_names=self._gate_own_names(channel),
                     mentioned_users=self._gate_mentioned_users(msg),
                     reply_to_user_id=self._gate_reply_author_id(msg),
+                    other_names=self._gate_other_names(channel, bot_user_id, messages),
                 )
                 if decision.action == Action.RESPOND:
                     if self._store.admit_mention_job(
@@ -1374,6 +1423,10 @@ class OIWatcher(discord.Client):
 
         bot_user_id = target.bot_user_id or (self.user.id if self.user else 0)
         mention_ids = [m.id for m in getattr(message, "mentions", [])]
+        resolved = getattr(getattr(message, "reference", None), "resolved", None)
+        loaded_recent = (
+            (message, resolved) if isinstance(resolved, discord.Message) else (message,)
+        )
         decision = evaluate(
             content=message.content or "",
             mention_ids=mention_ids,
@@ -1381,6 +1434,9 @@ class OIWatcher(discord.Client):
             bot_names=self._gate_own_names(message.channel),
             mentioned_users=self._gate_mentioned_users(message),
             reply_to_user_id=self._gate_reply_author_id(message),
+            other_names=self._gate_other_names(
+                message.channel, bot_user_id, loaded_recent
+            ),
         )
         logger.info(
             "[watcher] %s %s in %s",
