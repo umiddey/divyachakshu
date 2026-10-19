@@ -158,11 +158,11 @@ async def static_file(request: web.Request) -> web.Response:
 # helpers
 # --------------------------------------------------------------------------
 
-def _require_oc_serve(request: web.Request) -> tuple[str, UiServer] | web.Response:
+def _require_oc_serve(request: web.Request) -> str | web.Response:
     state: UiServer = request.app["state"]
     if not state.oc_serve:
         return _err("no private OpenCode server running; start it first", status=409)
-    return state.oc_serve["base"], state
+    return str(state.oc_serve["base"])
 
 
 def _stop_oc_serve(state: UiServer) -> None:
@@ -335,8 +335,9 @@ def watch_from_payload(payload: Any):
     if unknown:
         raise ValueError(f"unknown watch keys: {', '.join(sorted(unknown))}")
     ints: dict[str, int] = {}
-    for key in ("channel_id", "guild_id", "bot_user_id", "post_hourly_cap"):
+    for key in ("channel_id", "guild_id", "bot_user_id"):
         ints[key] = _coerce_int(payload, key) if key in payload else 0
+    ints["post_hourly_cap"] = _coerce_int(payload, "post_hourly_cap") if "post_hourly_cap" in payload else 3
     lists: dict[str, list[int]] = {}
     for key in ("ignored_channels", "allowed_channels"):
         raw = payload.get(key, [])

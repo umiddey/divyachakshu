@@ -45,6 +45,7 @@ def build_fake_opencode_app() -> web.Application:
             return web.json_response(
                 {"_tag": "BadRequest", "message": "key required"}, status=400
             )
+        state.setdefault("keys", []).append(body["key"])
         return web.Response(status=204)
 
     async def connect_oauth(request: web.Request) -> web.Response:
@@ -126,6 +127,7 @@ def build_fake_discord_app(state: dict[str, Any] | None = None) -> web.Applicati
     state = state if state is not None else {}
     state.setdefault("flags", FLAG_MESSAGE_CONTENT)
     state.setdefault("requests", [])
+    state.setdefault("tokens", {"your-fake-bot-token"})
     app = web.Application()
 
     def note(request: web.Request) -> None:
@@ -136,24 +138,28 @@ def build_fake_discord_app(state: dict[str, Any] | None = None) -> web.Applicati
             "has_bot_auth": request.headers.get("Authorization", "").startswith("Bot "),
         })
 
+    def authorized(request: web.Request) -> bool:
+        header = request.headers.get("Authorization", "")
+        return any(header == f"Bot {token}" for token in state["tokens"])
+
     def unauthorized() -> web.Response:
         return web.json_response({"message": "401: Unauthorized"}, status=401)
 
     async def me(request: web.Request) -> web.Response:
         note(request)
-        if not request.headers.get("Authorization"):
+        if not authorized(request):
             return unauthorized()
         return web.json_response({"id": "9001", "username": "fake-bot", "bot": True})
 
     async def application(request: web.Request) -> web.Response:
         note(request)
-        if not request.headers.get("Authorization"):
+        if not authorized(request):
             return unauthorized()
         return web.json_response({"id": "9001", "name": "fake-bot", "flags": state["flags"]})
 
     async def guilds(request: web.Request) -> web.Response:
         note(request)
-        if not request.headers.get("Authorization"):
+        if not authorized(request):
             return unauthorized()
         return web.json_response([
             {"id": "100", "name": "Guild One", "owner": True},
@@ -162,7 +168,7 @@ def build_fake_discord_app(state: dict[str, Any] | None = None) -> web.Applicati
 
     async def channels(request: web.Request) -> web.Response:
         note(request)
-        if not request.headers.get("Authorization"):
+        if not authorized(request):
             return unauthorized()
         if request.match_info["guild_id"] not in ("100", "200"):
             return web.json_response({"message": "Unknown Guild"}, status=404)
