@@ -32,6 +32,10 @@ jobs:
           (cd npm && npm pack --pack-destination "$GITHUB_WORKSPACE" >/dev/null)
       - name: Install the npm package globally
         run: npm install -g --no-fund --no-audit oi-agent-*.tgz
+      - name: Install OpenCode (OI's required harness, same installer as `oi init`)
+        run: |
+          npm install -g --no-fund --no-audit opencode-ai
+          opencode --version
       - name: Smoke the wrapper and the LaunchAgent
         run: bash scripts/macos-smoke.sh
       - name: Collect daemon logs on failure
