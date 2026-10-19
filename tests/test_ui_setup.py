@@ -90,6 +90,39 @@ async def test_opencode_status_reports_version(wizard, monkeypatch):
     assert data["authenticated"] is False
 
 
+async def test_opencode_status_shows_integration_display_name(wizard, monkeypatch):
+    """Connected providers show Integration.Info.name, not the npm package id."""
+    fake_opencode_on_path(wizard.tmp, monkeypatch)
+    monkeypatch.setattr(ui_server.oc, "authenticated", lambda paths: True)
+    monkeypatch.setattr(
+        ui_server.oc, "credential_integrations",
+        lambda paths: frozenset({"npm:@ai-sdk/openai-compatible"}),
+    )
+    start = await wizard.client.post("/api/opencode/login/start", json={})
+    assert (await start.json())["ok"] is True  # private serve serves the names
+    response = await wizard.client.get("/api/opencode/status")
+    data = await response.json()
+    assert data["authenticated"] is True
+    assert data["integrations"] == [
+        {"id": "npm:@ai-sdk/openai-compatible", "name": "OpenAI-compatible"}
+    ]
+
+
+async def test_opencode_status_falls_back_to_integration_id(wizard, monkeypatch):
+    """Without a live serve there is no name source: show the id as-is."""
+    fake_opencode_on_path(wizard.tmp, monkeypatch)
+    monkeypatch.setattr(ui_server.oc, "authenticated", lambda paths: True)
+    monkeypatch.setattr(
+        ui_server.oc, "credential_integrations",
+        lambda paths: frozenset({"npm:@ai-sdk/openai-compatible"}),
+    )
+    response = await wizard.client.get("/api/opencode/status")
+    data = await response.json()
+    assert data["integrations"] == [
+        {"id": "npm:@ai-sdk/openai-compatible", "name": "npm:@ai-sdk/openai-compatible"}
+    ]
+
+
 async def test_opencode_install_runs_shared_installer(wizard, monkeypatch):
     fake_opencode_on_path(wizard.tmp, monkeypatch)
     calls: list[object] = []

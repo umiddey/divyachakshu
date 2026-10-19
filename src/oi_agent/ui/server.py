@@ -364,6 +364,27 @@ async def api_state(request: web.Request) -> web.Response:
 # API handlers — P2 wizard: OpenCode
 # --------------------------------------------------------------------------
 
+async def _integration_names(state: UiServer) -> dict[str, str]:
+    """integration id -> human-readable name via the private serve ({} if none)."""
+    base = (state.oc_serve or {}).get("base")
+    if not base:
+        return {}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(
+                f"{base}/api/integration", timeout=HTTP_TIMEOUT
+            ) as resp:
+                data = await resp.json(content_type=None)
+        except aiohttp.ClientError:
+            return {}
+    entries = data.get("data", []) if isinstance(data, dict) else data
+    return {
+        str(entry["id"]): str(entry.get("name") or entry["id"])
+        for entry in entries or []
+        if isinstance(entry, dict) and entry.get("id")
+    }
+
+
 async def api_opencode_status(request: web.Request) -> web.Response:
     state: UiServer = request.app["state"]
 
@@ -384,7 +405,14 @@ async def api_opencode_status(request: web.Request) -> web.Response:
         info["integrations"] = sorted(oc.credential_integrations(paths))
         return info
 
-    return _json(await asyncio.to_thread(probe))
+    info = await asyncio.to_thread(probe)
+    if info["integrations"]:
+        names = await _integration_names(state)
+        info["integrations"] = [
+            {"id": integration_id, "name": names.get(integration_id, integration_id)}
+            for integration_id in info["integrations"]
+        ]
+    return _json(info)
 
 
 async def api_opencode_install(request: web.Request) -> web.Response:

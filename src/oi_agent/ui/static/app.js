@@ -50,9 +50,10 @@ async function refreshOcStatus() {
     }
     $("btn-oc-install").hidden = true;
     panel.innerHTML = st.authenticated
-      ? `OpenCode <b>${st.version}</b> installed. Provider connected: <b>${st.integrations.join(", ")}</b>.`
+      ? `OpenCode <b>${st.version}</b> installed. Provider connected: <b>${st.integrations.map((i) => i.name || i.id).join(", ")}</b>.`
       : `OpenCode <b>${st.version}</b> installed. No provider connected yet.`;
-    $("oc-login").hidden = st.authenticated;
+    $("oc-signin").hidden = st.authenticated;
+    $("oc-model-block").hidden = !st.authenticated;
     $("btn-oc-next").disabled = !st.authenticated;
     if (st.authenticated) await loadModels();
   } catch (err) {
@@ -265,6 +266,10 @@ function updateWatchesFromGuilds() {
   renderCaps();
 }
 
+function updateReposNext() {
+  $("btn-repos-next").disabled = !state.watches.some((watch) => watch.repos.length);
+}
+
 async function renderRepoPickers() {
   const host = $("watch-repos");
   host.innerHTML = "";
@@ -301,6 +306,7 @@ async function renderRepoPickers() {
     box.dataset.scanIndex = index;
     host.append(box);
   });
+  updateReposNext();
 }
 
 async function scanRepos() {
@@ -320,6 +326,7 @@ async function scanRepos() {
           watch.repos = cb.checked
             ? [...new Set([...watch.repos, repo])]
             : watch.repos.filter((r) => r !== repo);
+          updateReposNext();
         };
         l.append(cb, document.createTextNode(` ${repo}`));
         found.append(l);
@@ -487,7 +494,11 @@ async function loadSettings() {
       l.append(input);
       form.append(l);
     }
-    renderDashWatches(cfg.watches || []);
+  // A plain save posts form fields plus these two; seed them from the loaded
+  // config so saving one setting cannot wipe watches/write_dirs.
+  state.dashWatches = Array.isArray(cfg.watches) ? cfg.watches : [];
+  state.dashWriteDirs = Array.isArray(cfg.write_dirs) ? cfg.write_dirs : [];
+  renderDashWatches(state.dashWatches);
   } catch (err) {
     setError("settings-error", String(err.message || err));
   }
