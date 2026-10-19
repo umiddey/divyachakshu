@@ -342,7 +342,7 @@ def test_render_launchd_plist_parses_and_runs_oi_run(tmp_path):
     data = plistlib.loads(render_launchd_plist(
         _config(tmp_path), oi_binary="/opt/oi/bin/oi", home=home,
     ))
-    assert data["Label"] == "ai.oi-agent.oi"
+    assert data["Label"] == "ai.divyachakshu.oi"
     assert data["ProgramArguments"] == [
         "/opt/oi/bin/oi", "run", "--config", str(home / ".config/oi/config.toml"),
     ]
@@ -365,14 +365,14 @@ def test_darwin_install_writes_plist_and_runs_launchctl_sequence(tmp_path, monke
     calls = _fake_run(monkeypatch)
     install(_config(tmp_path), user_mode=True,
             config_path=tmp_path / "cfg.toml", secrets_path=tmp_path / "secrets.env")
-    plist_path = tmp_path / "Library/LaunchAgents/ai.oi-agent.oi.plist"
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
     data = plistlib.loads(plist_path.read_bytes())
-    assert data["Label"] == "ai.oi-agent.oi"
+    assert data["Label"] == "ai.divyachakshu.oi"
     assert data["ProgramArguments"][0] == "/opt/oi/bin/oi"
     assert calls == [
-        ["launchctl", "bootout", "gui/501/ai.oi-agent.oi"],
+        ["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"],
         ["launchctl", "bootstrap", "gui/501", str(plist_path)],
-        ["launchctl", "kickstart", "-k", "gui/501/ai.oi-agent.oi"],
+        ["launchctl", "kickstart", "-k", "gui/501/ai.divyachakshu.oi"],
     ]
 
 
@@ -385,7 +385,7 @@ def test_darwin_install_dry_run_writes_nothing(tmp_path, monkeypatch):
     rendered = install(_config(tmp_path), user_mode=True, dry_run=True,
                        config_path=tmp_path / "cfg.toml",
                        secrets_path=tmp_path / "secrets.env")
-    assert plistlib.loads(rendered.encode("utf-8"))["Label"] == "ai.oi-agent.oi"
+    assert plistlib.loads(rendered.encode("utf-8"))["Label"] == "ai.divyachakshu.oi"
     assert calls == []
     assert not (tmp_path / "Library").exists()
 
@@ -418,8 +418,8 @@ def test_darwin_lifecycle_status_and_restart_use_launchctl(monkeypatch):
     lifecycle("status", service_name="oi")
     lifecycle("restart", service_name="oi")
     assert calls == [
-        ["launchctl", "print", "gui/501/ai.oi-agent.oi"],
-        ["launchctl", "kickstart", "-k", "gui/501/ai.oi-agent.oi"],
+        ["launchctl", "print", "gui/501/ai.divyachakshu.oi"],
+        ["launchctl", "kickstart", "-k", "gui/501/ai.divyachakshu.oi"],
     ]
 
 
@@ -454,9 +454,9 @@ def test_darwin_uninstall_boots_out_and_removes_plist(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
     calls = _fake_run(monkeypatch)
-    plist_path = tmp_path / "Library/LaunchAgents/ai.oi-agent.oi.plist"
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
     plist_path.parent.mkdir(parents=True)
     plist_path.write_bytes(b"<?xml version='1.0'?><plist version='1.0'/>")
     uninstall(service_name="oi")
     assert not plist_path.exists()
-    assert calls == [["launchctl", "bootout", "gui/501/ai.oi-agent.oi"]]
+    assert calls == [["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"]]

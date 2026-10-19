@@ -2,7 +2,7 @@
 # Real-macOS smoke for the npm wrapper + the launchd LaunchAgent (plan P6).
 # Runs on a GitHub-hosted macOS runner (never on a dev Linux box).
 # Assumes: repo checkout as cwd, `uv build` produced dist/*.whl, the npm
-# tarball was packed to ./oi-agent-*.tgz and installed with `npm install -g`.
+# tarball was packed to ./divyachakshu-*.tgz and installed with `npm install -g`.
 # Verifies: the first `oi` run installs the pinned spec into the wrapper's
 # private uv tool dirs, the second run reuses it, `daemon install --user-mode`
 # registers the LaunchAgent pointing at the PRIVATE Python oi (never the node
@@ -12,11 +12,11 @@
 set -euo pipefail
 
 SERVICE="oi"
-LABEL="ai.oi-agent.${SERVICE}"
+LABEL="ai.divyachakshu.${SERVICE}"
 LOG_DIR="$HOME/Library/Logs/oi"
 LOG_FILE="$LOG_DIR/${SERVICE}.log"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-PRIVATE_OI="$HOME/Library/Application Support/oi-agent/npm/bin/oi"
+PRIVATE_OI="$HOME/Library/Application Support/divyachakshu/npm/bin/oi"
 TMPD="${RUNNER_TEMP:-$(mktemp -d)}"
 mkdir -p "$TMPD"
 
@@ -24,8 +24,8 @@ fail() { echo "macos-smoke: FAIL: $*" >&2; exit 1; }
 
 WHEEL="$(ls "$PWD"/dist/*.whl 2>/dev/null | head -n 1)"
 [ -n "$WHEEL" ] || fail "no wheel under dist/ (run: uv build)"
-TARBALL="$(ls "$PWD"/oi-agent-*.tgz 2>/dev/null | head -n 1)"
-[ -n "$TARBALL" ] || fail "no oi-agent-*.tgz tarball in the workspace"
+TARBALL="$(ls "$PWD"/divyachakshu-*.tgz 2>/dev/null | head -n 1)"
+[ -n "$TARBALL" ] || fail "no divyachakshu-*.tgz tarball in the workspace"
 command -v oi >/dev/null 2>&1 \
   || fail "oi not on PATH (install the npm tarball globally first)"
 
@@ -75,7 +75,7 @@ if ! launchctl print "gui/$UID_N/$LABEL" >"$TMPD/print.txt" 2>&1; then
   cat "$TMPD/print.txt" >&2
   fail "print gui/$UID_N/$LABEL failed"
 fi
-PRIVATE_VENV_OI="$HOME/Library/Application Support/oi-agent/npm/tools/divyachakshu/bin/oi"
+PRIVATE_VENV_OI="$HOME/Library/Application Support/divyachakshu/npm/tools/divyachakshu/bin/oi"
 [ "$(realpath "$PRIVATE_OI")" = "$PRIVATE_VENV_OI" ] \
   || fail "private oi symlink does not resolve to $PRIVATE_VENV_OI"
 grep -qF "$PRIVATE_VENV_OI" "$TMPD/print.txt" \

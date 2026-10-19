@@ -24,7 +24,7 @@ from .store import Store
 SERVICE_DIR = Path("/etc/systemd/system")
 DEFAULT_SERVICE_NAME = "oi"
 DEFAULT_DAEMON_USER = "oi"
-LAUNCHD_LABEL_PREFIX = "ai.oi-agent"
+LAUNCHD_LABEL_PREFIX = "ai.divyachakshu"
 LAUNCHD_LOG_TAIL_LINES = 200
 
 
@@ -240,7 +240,7 @@ def render_launchd_plist(cfg: Config, *, service_name: str = DEFAULT_SERVICE_NAM
 
     Args:
         cfg: Validated OpenCode-only configuration.
-        service_name: Service name appended to the ``ai.oi-agent`` label prefix.
+        service_name: Service name appended to the ``ai.divyachakshu`` label prefix.
         config_path: OI config path passed to ``oi run --config``.
         secrets_path: OI Discord-token env file, exported as ``OI_SECRETS_PATH``.
         oi_binary: Real Python ``oi`` executable; resolved from the running

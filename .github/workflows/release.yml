@@ -1,5 +1,5 @@
 # Publishes a v* tag: PyPI (divyachakshu) via trusted publishing, then the
-# npm wrapper (oi-agent) via npm provenance. Both are OIDC-authenticated —
+# npm wrapper (divyachakshu) via npm provenance. Both are OIDC-authenticated —
 # no PyPI token and no NPM_TOKEN exist or are used. Agents never publish;
 # the one-time bootstrap is described in README "Releasing".
 name: release
@@ -24,7 +24,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   npm:
-    name: npm (oi-agent)
+    name: npm (divyachakshu)
     needs: pypi
     runs-on: ubuntu-latest
     permissions:

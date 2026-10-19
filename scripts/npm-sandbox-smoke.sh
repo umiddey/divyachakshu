@@ -4,13 +4,13 @@
 #   <sandbox>/bin/oi --help with OI_NPM_PACKAGE_SPEC=<locally built wheel>.
 # HOME and XDG_DATA_HOME live under .sandbox/, so uv, npm caches and the
 # wrapper's private uv tool dir never leave the sandbox. The smoke fails if
-# anything changes under the real ~/.local/share/oi-agent, and removes
+# anything changes under the real ~/.local/share/divyachakshu, and removes
 # .sandbox/ on the way out.
 set -euo pipefail
 
 WORKTREE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SANDBOX="$WORKTREE/.sandbox"
-REAL_DATA="$HOME/.local/share/oi-agent"
+REAL_DATA="$HOME/.local/share/divyachakshu"
 
 fail() { echo "npm-sandbox-smoke: FAIL: $*" >&2; exit 1; }
 cleanup() { rm -rf "$SANDBOX"; }
@@ -24,7 +24,7 @@ WHEEL="$(ls "$WORKTREE"/dist/*.whl 2>/dev/null | head -n 1)"
 
 mkdir -p "$SANDBOX"
 (cd "$WORKTREE/npm" && npm pack --pack-destination "$SANDBOX" >/dev/null)
-TARBALL="$(ls "$SANDBOX"/oi-agent-*.tgz 2>/dev/null | head -n 1)"
+TARBALL="$(ls "$SANDBOX"/divyachakshu-*.tgz 2>/dev/null | head -n 1)"
 [ -n "$TARBALL" ] || fail "npm pack produced no tarball"
 
 # Baseline of the real data dir before the wrapper runs.
@@ -50,7 +50,7 @@ if [ "$first_rc" -ne 0 ]; then
 fi
 grep -q "installing" "$SANDBOX/first.err" \
   || fail "first run did not install (no 'installing' line on stderr)"
-[ -x "$XDG_DATA_HOME/oi-agent/npm/bin/oi" ] \
+[ -x "$XDG_DATA_HOME/divyachakshu/npm/bin/oi" ] \
   || fail "private oi binary not inside the sandbox data dir"
 
 # Second run: must reuse the install, not reinstall.
@@ -66,7 +66,7 @@ if grep -q "installing" "$SANDBOX/second.err"; then
   fail "second run reinstalled the tool"
 fi
 
-# Nothing may appear under the real ~/.local/share/oi-agent.
+# Nothing may appear under the real ~/.local/share/divyachakshu.
 real_after="$(ls -1AR "$REAL_DATA" 2>/dev/null || true)"
 if [ "$real_before" != "$real_after" ]; then
   diff <(printf '%s\n' "$real_before") <(printf '%s\n' "$real_after") >&2 || true

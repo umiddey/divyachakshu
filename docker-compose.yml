@@ -1,5 +1,5 @@
 services:
-  oi-agent:
+  divyachakshu:
     build: .
     restart: always
     env_file: .env

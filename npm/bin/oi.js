@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// oi-agent npm wrapper: runs the real Python OI (PyPI distribution
+// divyachakshu npm wrapper: runs the real Python OI (PyPI distribution
 // "divyachakshu") through a private `uv tool` install, so the npm `oi` never
 // collides with a user's own `oi`. Node built-ins only. Installs on first
 // run — never at npm install time (users may run --ignore-scripts; there
@@ -12,7 +12,7 @@ const os = require("os");
 const path = require("path");
 
 function fail(message) {
-  process.stderr.write(`oi-agent: ${message}\n`);
+  process.stderr.write(`divyachakshu: ${message}\n`);
   process.exit(1);
 }
 
@@ -29,7 +29,7 @@ const spec =
   process.env.OI_NPM_PACKAGE_SPEC || `divyachakshu==${pkg.version}`;
 
 // Private uv roots under the user data dir. The pinned OI lives in
-// <data>/oi-agent/npm/{tools,bin}, separate from uv's default locations and
+// <data>/divyachakshu/npm/{tools,bin}, separate from uv's default locations and
 // from any `oi` the user installed by hand.
 function dataHome() {
   if (process.platform === "darwin") {
@@ -40,8 +40,8 @@ function dataHome() {
   return path.join(os.homedir(), ".local", "share");
 }
 
-const toolDir = path.join(dataHome(), "oi-agent", "npm", "tools"); // UV_TOOL_DIR
-const toolBinDir = path.join(dataHome(), "oi-agent", "npm", "bin"); // UV_TOOL_BIN_DIR
+const toolDir = path.join(dataHome(), "divyachakshu", "npm", "tools"); // UV_TOOL_DIR
+const toolBinDir = path.join(dataHome(), "divyachakshu", "npm", "bin"); // UV_TOOL_BIN_DIR
 const privateOi = path.join(toolBinDir, "oi");
 
 function isExecutableFile(p) {
@@ -130,7 +130,7 @@ async function main() {
   let uv = findUv();
   if (!uv) {
     process.stderr.write(
-      "oi-agent: uv not found. Installing uv with the official installer\n" +
+      "divyachakshu: uv not found. Installing uv with the official installer\n" +
         "  (curl -LsSf https://astral.sh/uv/install.sh | sh, UV_NO_MODIFY_PATH=1,\n" +
         "  PATH is not modified), then installing OI into\n" +
         `  ${toolDir}\n`,
@@ -157,11 +157,11 @@ async function main() {
       return spawnOi();
     }
     process.stderr.write(
-      `oi-agent: upgrading private OI to ${spec} (uv tool dir: ${toolDir})...\n`,
+      `divyachakshu: upgrading private OI to ${spec} (uv tool dir: ${toolDir})...\n`,
     );
   } else {
     process.stderr.write(
-      `oi-agent: installing ${spec} into the private uv tool dir ${toolDir}...\n`,
+      `divyachakshu: installing ${spec} into the private uv tool dir ${toolDir}...\n`,
     );
   }
   const code = await runInstall(

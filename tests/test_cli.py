@@ -1693,7 +1693,7 @@ def test_daemon_install_darwin_writes_launchagent(tmp_path, monkeypatch):
         "daemon", "install", "--user-mode", "--config", str(cfg_path),
     ])
     assert result.exit_code == 0, result.output
-    plist_path = tmp_path / "Library/LaunchAgents/ai.oi-agent.oi.plist"
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
     assert plist_path.is_file()
     assert ["launchctl", "bootstrap", "gui/501", str(plist_path)] in calls
 
@@ -1712,7 +1712,7 @@ def test_daemon_status_darwin_prints_launchctl_output(monkeypatch):
     result = runner.invoke(app, ["daemon", "status"])
     assert result.exit_code == 0, result.output
     assert "pid = 4242" in result.output
-    assert calls == [["launchctl", "print", "gui/501/ai.oi-agent.oi"]]
+    assert calls == [["launchctl", "print", "gui/501/ai.divyachakshu.oi"]]
 
 
 def test_daemon_uninstall_darwin_boots_out_and_removes_plist(tmp_path, monkeypatch):
@@ -1727,10 +1727,10 @@ def test_daemon_uninstall_darwin_boots_out_and_removes_plist(tmp_path, monkeypat
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("oi_agent.daemon._run", fake)
-    plist_path = tmp_path / "Library/LaunchAgents/ai.oi-agent.oi.plist"
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
     plist_path.parent.mkdir(parents=True)
     plist_path.write_bytes(b"<?xml version='1.0'?><plist version='1.0'/>")
     result = runner.invoke(app, ["daemon", "uninstall"])
     assert result.exit_code == 0, result.output
     assert not plist_path.exists()
-    assert calls == [["launchctl", "bootout", "gui/501/ai.oi-agent.oi"]]
+    assert calls == [["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"]]

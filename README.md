@@ -66,7 +66,7 @@ post_hourly_cap = 3
 On Linux or macOS, `oi` installs from npm without any Python setup:
 
 ```bash
-npm install -g oi-agent    # needs Node >= 18; no npm dependencies, no install scripts
+npm install -g divyachakshu    # needs Node >= 18; no npm dependencies, no install scripts
 oi --help
 ```
 
@@ -77,8 +77,8 @@ The npm package is a thin wrapper around the Python distribution
    official installer (`UV_NO_MODIFY_PATH=1`; your `PATH` is not modified);
 2. installs `divyachakshu`, pinned to exactly the npm package's version, with
    `uv tool install --force --python 3.11` into a private uv root
-   (`~/.local/share/oi-agent/npm` on Linux, `~/Library/Application
-   Support/oi-agent/npm` on macOS; `XDG_DATA_HOME` respected), so it never
+   (`~/.local/share/divyachakshu/npm` on Linux, `~/Library/Application
+   Support/divyachakshu/npm` on macOS; `XDG_DATA_HOME` respected), so it never
    collides with an `oi` you installed yourself;
 3. hands your arguments, stdio, exit code, and SIGINT/SIGTERM/SIGHUP to the
    installed `oi`.
@@ -92,7 +92,7 @@ not supported — use WSL2.
 
 On macOS the daemon runs as a per-user LaunchAgent; Linux systemd behavior is
 unchanged. `oi daemon install` (or `oi init --install-daemon`) writes
-`~/Library/LaunchAgents/ai.oi-agent.<service_name>.plist` (rendered with
+`~/Library/LaunchAgents/ai.divyachakshu.<service_name>.plist` (rendered with
 `plistlib`; `RunAtLoad` + `KeepAlive`; program arguments are the real Python
 `oi` binary with `run --config <path>`; the environment `PATH` includes the
 OpenCode bin dir; stdout/stderr go to `~/Library/Logs/oi/<service_name>.log`),
@@ -246,13 +246,13 @@ publish):
 2. Commit, tag `vX.Y.Z`, and push the tag. `release.yml` then:
    - builds the wheel/sdist and publishes `divyachakshu` to PyPI by trusted
      publishing (OIDC, `environment: pypi`, no API token), then
-   - publishes the `oi-agent` npm wrapper with provenance (OIDC, no
+   - publishes the `divyachakshu` npm wrapper with provenance (OIDC, no
      `NPM_TOKEN`).
 
 One-time bootstrap (owner + maintainer, before the first tagged release):
 register a PyPI *pending trusted publisher* for project `divyachakshu`
-(repo `umiddey/oi-agent`, workflow `release.yml`, environment `pypi`); create
-the npm package by publishing `oi-agent` 0.1.0 once by hand; then register
+(repo `umiddey/divyachakshu`, workflow `release.yml`, environment `pypi`); create
+the npm package by publishing `divyachakshu` 0.1.0 once by hand; then register
 the npm Trusted Publisher for the same workflow. Every later tag publishes
 from Actions.
 

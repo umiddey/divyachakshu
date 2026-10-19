@@ -1,11 +1,11 @@
-# oi-agent (npm wrapper)
+# divyachakshu (npm wrapper)
 
-Installs the `oi` command for [OI](https://github.com/umiddey/oi-agent), a
+Installs the `oi` command for [OI](https://github.com/umiddey/divyachakshu), a
 standalone Discord bot that answers only when explicitly addressed and audits
 local git clones read-only through [OpenCode](https://opencode.ai).
 
 ```bash
-npm install -g oi-agent
+npm install -g divyachakshu
 oi --help
 ```
 
@@ -19,7 +19,7 @@ oi --help
 - OI itself is the Python distribution [`divyachakshu`](https://pypi.org/project/divyachakshu/),
   pinned to exactly this package's version and installed with
   `uv tool install --force --python 3.11` into a private uv root:
-  `~/.local/share/oi-agent/npm` on Linux, `~/Library/Application Support/oi-agent/npm`
+  `~/.local/share/divyachakshu/npm` on Linux, `~/Library/Application Support/divyachakshu/npm`
   on macOS (`XDG_DATA_HOME` respected). It never collides with an `oi` you
   installed yourself, and later runs reuse it — the tool is only reinstalled
   when the pinned version changes.

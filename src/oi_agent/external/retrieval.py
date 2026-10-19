@@ -55,7 +55,7 @@ MAX_REDIRECTS = 3
 CONNECT_TIMEOUT_SECONDS = 10.0
 TOTAL_TIMEOUT_SECONDS = 20.0
 MAX_RESPONSE_BYTES = MAX_URL_BYTES
-USER_AGENT = "oi-agent/0.1 (+bounded public evidence retrieval)"
+USER_AGENT = "divyachakshu/0.1 (+bounded public evidence retrieval)"
 
 # Hostnames that never denote public internet content.
 _BLOCKED_HOST_SUFFIXES = (

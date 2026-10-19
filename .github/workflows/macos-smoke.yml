@@ -31,7 +31,7 @@ jobs:
           uv build
           (cd npm && npm pack --pack-destination "$GITHUB_WORKSPACE" >/dev/null)
       - name: Install the npm package globally
-        run: npm install -g --no-fund --no-audit oi-agent-*.tgz
+        run: npm install -g --no-fund --no-audit divyachakshu-*.tgz
       - name: Install OpenCode (OI's required harness, same installer as `oi init`)
         run: |
           npm install -g --no-fund --no-audit opencode-ai

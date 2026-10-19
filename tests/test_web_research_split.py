@@ -991,7 +991,7 @@ async def test_plain_topic_with_history_link_hands_no_urls_to_runner(
     await watcher._apply_research(
         prepared,
         "what is the oi agent about",
-        ["https://github.com/umiddey/oi-agent its open source, so enjoy"],
+        ["https://github.com/umiddey/divyachakshu its open source, so enjoy"],
     )
     assert research_calls[0]["urls"] == []
 
