@@ -31,7 +31,7 @@ command -v oi >/dev/null 2>&1 \
 
 # First run: the wrapper installs the pinned spec into its private dirs.
 set +e
-OI_NPM_PACKAGE_SPEC="$PWD/$WHEEL" oi --help >"$TMPD/first.out" 2>"$TMPD/first.err"
+OI_NPM_PACKAGE_SPEC="$WHEEL" oi --help >"$TMPD/first.out" 2>"$TMPD/first.err"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -44,7 +44,7 @@ grep -q "installing" "$TMPD/first.err" \
 
 # Second run: must reuse the private install, never reinstall.
 set +e
-OI_NPM_PACKAGE_SPEC="$PWD/$WHEEL" oi --help >"$TMPD/second.out" 2>"$TMPD/second.err"
+OI_NPM_PACKAGE_SPEC="$WHEEL" oi --help >"$TMPD/second.out" 2>"$TMPD/second.err"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
