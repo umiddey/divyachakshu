@@ -1,8 +1,38 @@
 """Shared fixtures for OI tests."""
 
+import os
 import sqlite3
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def fake_opencode_on_path(tmp_path, monkeypatch):
+    """Put a fake `opencode` executable first on PATH for every test.
+
+    Config validation (``config._resolve_binary``) and OpenCode bootstrap
+    discovery (``bootstrap.resolve_binary``) resolve the bare name
+    ``opencode`` through PATH, so without this fixture every test that
+    persists a config needs a real OpenCode install, and on machines that
+    have one the real binary would be executed. The fake answers
+    ``--version`` with a supported native v2 release and ``models`` with a
+    canned listing, so the suite runs on a machine without OpenCode and
+    never executes a real one.
+    """
+    bin_dir = tmp_path / "fake-opencode-bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  --version) echo 'opencode 2.0.5' ;;\n"
+        "  models) echo 'openai/gpt-4o-mini' ;;\n"
+        "  *) : ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
 
 
 @pytest.fixture
