@@ -1,6 +1,8 @@
 """Tests for systemd unit hardening and safe daemon preflight."""
 
+import plistlib
 import stat
+import subprocess
 
 import pytest
 
@@ -12,8 +14,12 @@ from oi_agent.daemon import (
     ensure_opencode_for_user,
     ensure_user,
     install,
+    lifecycle,
+    render_launchd_plist,
     render_unit,
+    resolve_oi_binary,
     stream_logs,
+    uninstall,
 )
 from oi_agent.store import Store
 
@@ -289,3 +295,168 @@ def test_doctor_reports_missing_credential_and_model_without_store(tmp_path, mon
     assert any("no OpenCode provider is authenticated" in f for f in failures)
     assert any("selected model unavailable" in f for f in failures)
     assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# macOS launchd LaunchAgent (fake runner; launchctl never runs here)
+# ---------------------------------------------------------------------------
+
+
+def _fake_run(monkeypatch, fail_actions=()):
+    """Record launchctl commands; return success unless the action is listed."""
+    calls: list[list[str]] = []
+
+    def fake(command, *, check=False):
+        calls.append(list(command))
+        code = 1 if command[1] in fail_actions else 0
+        return subprocess.CompletedProcess(command, code, "", "boom" if code else "")
+
+    monkeypatch.setattr("oi_agent.daemon._run", fake)
+    return calls
+
+
+def test_resolve_oi_binary_prefers_the_running_argv0(monkeypatch, tmp_path):
+    """The generated service must point at the real Python oi, not a shim."""
+    real = tmp_path / "bin" / "oi"
+    real.parent.mkdir()
+    real.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    real.chmod(0o755)
+    monkeypatch.setattr("oi_agent.daemon.sys.argv", [str(real), "daemon", "install"])
+    assert resolve_oi_binary() == str(real.resolve())
+
+
+def test_resolve_oi_binary_falls_back_to_path_lookup(monkeypatch):
+    """An unusable argv[0] falls back to the oi found on PATH."""
+    monkeypatch.setattr("oi_agent.daemon.sys.argv", ["-c"])
+    monkeypatch.setattr(
+        "oi_agent.daemon.shutil.which",
+        lambda name: "/opt/oi/bin/oi" if name == "oi" else None,
+    )
+    assert resolve_oi_binary() == "/opt/oi/bin/oi"
+
+
+def test_render_launchd_plist_parses_and_runs_oi_run(tmp_path):
+    """The rendered plist parses with plistlib and runs `oi run --config`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    data = plistlib.loads(render_launchd_plist(
+        _config(tmp_path), oi_binary="/opt/oi/bin/oi", home=home,
+    ))
+    assert data["Label"] == "ai.divyachakshu.oi"
+    assert data["ProgramArguments"] == [
+        "/opt/oi/bin/oi", "run", "--config", str(home / ".config/oi/config.toml"),
+    ]
+    assert data["RunAtLoad"] is True
+    assert data["KeepAlive"] is True
+    assert data["StandardOutPath"] == str(home / "Library/Logs/oi/oi.log")
+    assert data["StandardErrorPath"] == data["StandardOutPath"]
+    env = data["EnvironmentVariables"]
+    assert env["PATH"].startswith("/opt/oi/bin:")
+    assert env["OI_CONFIG_PATH"] == str(home / ".config/oi/config.toml")
+    assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+
+
+def test_darwin_install_writes_plist_and_runs_launchctl_sequence(tmp_path, monkeypatch):
+    """Install writes the LaunchAgent plist and bootstraps via launchctl in order."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    monkeypatch.setattr("oi_agent.daemon.resolve_oi_binary", lambda: "/opt/oi/bin/oi")
+    calls = _fake_run(monkeypatch)
+    install(_config(tmp_path), user_mode=True,
+            config_path=tmp_path / "cfg.toml", secrets_path=tmp_path / "secrets.env")
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
+    data = plistlib.loads(plist_path.read_bytes())
+    assert data["Label"] == "ai.divyachakshu.oi"
+    assert data["ProgramArguments"][0] == "/opt/oi/bin/oi"
+    assert calls == [
+        ["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"],
+        ["launchctl", "bootstrap", "gui/501", str(plist_path)],
+        ["launchctl", "kickstart", "-k", "gui/501/ai.divyachakshu.oi"],
+    ]
+
+
+def test_darwin_install_dry_run_writes_nothing(tmp_path, monkeypatch):
+    """Dry-run renders the plist without filesystem or launchctl actions."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("oi_agent.daemon.resolve_oi_binary", lambda: "/opt/oi/bin/oi")
+    calls = _fake_run(monkeypatch)
+    rendered = install(_config(tmp_path), user_mode=True, dry_run=True,
+                       config_path=tmp_path / "cfg.toml",
+                       secrets_path=tmp_path / "secrets.env")
+    assert plistlib.loads(rendered.encode("utf-8"))["Label"] == "ai.divyachakshu.oi"
+    assert calls == []
+    assert not (tmp_path / "Library").exists()
+
+
+def test_darwin_system_mode_refuses(tmp_path, monkeypatch):
+    """The dedicated daemon-user system mode is Linux-only."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    with pytest.raises(DaemonError, match="LaunchAgent"):
+        install(_config(tmp_path), user_mode=False)
+
+
+def test_darwin_install_bootstrap_failure_raises_and_skips_kickstart(tmp_path, monkeypatch):
+    """A failing bootstrap aborts the install before kickstart."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    monkeypatch.setattr("oi_agent.daemon.resolve_oi_binary", lambda: "/opt/oi/bin/oi")
+    calls = _fake_run(monkeypatch, fail_actions=("bootstrap",))
+    with pytest.raises(DaemonError, match="launchctl bootstrap failed"):
+        install(_config(tmp_path), user_mode=True,
+                config_path=tmp_path / "cfg.toml", secrets_path=tmp_path / "secrets.env")
+    assert [command[1] for command in calls] == ["bootout", "bootstrap"]
+
+
+def test_darwin_lifecycle_status_and_restart_use_launchctl(monkeypatch):
+    """status prints via `launchctl print`; restart kickstarts the label."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    calls = _fake_run(monkeypatch)
+    lifecycle("status", service_name="oi")
+    lifecycle("restart", service_name="oi")
+    assert calls == [
+        ["launchctl", "print", "gui/501/ai.divyachakshu.oi"],
+        ["launchctl", "kickstart", "-k", "gui/501/ai.divyachakshu.oi"],
+    ]
+
+
+def test_darwin_logs_tail_reads_log_file(tmp_path, monkeypatch):
+    """Non-follow logs tail the LaunchAgent log file; missing logs fail."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    log = tmp_path / "Library/Logs/oi/oi.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("line-1\nline-2\n", encoding="utf-8")
+    assert lifecycle("logs", service_name="oi") == "line-1\nline-2"
+    with pytest.raises(DaemonError, match="no LaunchAgent log file"):
+        lifecycle("logs", service_name="missing")
+
+
+def test_darwin_stream_logs_follows_log_file(tmp_path, monkeypatch):
+    """Follow mode tails the LaunchAgent log instead of journalctl."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seen = []
+    monkeypatch.setattr(
+        "oi_agent.daemon.subprocess.run",
+        lambda cmd, check=False: seen.append(cmd),
+    )
+    stream_logs("oi")
+    assert seen == [["tail", "-f", str(tmp_path / "Library/Logs/oi/oi.log")]]
+
+
+def test_darwin_uninstall_boots_out_and_removes_plist(tmp_path, monkeypatch):
+    """Uninstall boots out the label and deletes the plist."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    calls = _fake_run(monkeypatch)
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
+    plist_path.parent.mkdir(parents=True)
+    plist_path.write_bytes(b"<?xml version='1.0'?><plist version='1.0'/>")
+    uninstall(service_name="oi")
+    assert not plist_path.exists()
+    assert calls == [["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"]]

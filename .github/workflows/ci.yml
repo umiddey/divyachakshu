@@ -1,0 +1,15 @@
+# PR gate: the full test suite (runs without a real OpenCode — tests/conftest.py
+# puts a fake `opencode` on PATH) plus the release version agreement.
+name: ci
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: full test suite
+        run: uv run pytest -q
+      - name: release versions agree
+        run: bash scripts/check-release-versions.sh

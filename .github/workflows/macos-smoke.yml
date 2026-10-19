@@ -1,0 +1,53 @@
+# Real-macOS smoke (plan P6): the npm wrapper must install OI into its
+# private uv tool dirs and the launchd LaunchAgent must start the private
+# Python oi, never the node shim. No secrets involved: the Discord token is
+# a fake string written by scripts/macos-smoke.sh on the ephemeral runner.
+name: macos-smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - feat/mac-npm
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest = macOS 26 (Apple Silicon); macos-15-intel is the
+        # newest Intel label GitHub still offers (runner-images docs).
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build wheel and npm tarball
+        run: |
+          uv build
+          (cd npm && npm pack --pack-destination "$GITHUB_WORKSPACE" >/dev/null)
+      - name: Install the npm package globally
+        run: npm install -g --no-fund --no-audit divyachakshu-*.tgz
+      - name: Install OpenCode (OI's required harness, same installer as `oi init`)
+        run: |
+          npm install -g --no-fund --no-audit opencode-ai
+          opencode --version
+      - name: Smoke the wrapper and the LaunchAgent
+        run: bash scripts/macos-smoke.sh
+      - name: Collect daemon logs on failure
+        if: failure()
+        run: |
+          mkdir -p smoke-logs/logs smoke-logs/launchagents
+          cp -R "$HOME/Library/Logs/oi/." smoke-logs/logs/ 2>/dev/null || true
+          cp -R "$HOME/Library/LaunchAgents/." smoke-logs/launchagents/ 2>/dev/null || true
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-smoke-logs-${{ matrix.os }}
+          path: smoke-logs
+          if-no-files-found: ignore

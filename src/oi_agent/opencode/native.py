@@ -233,7 +233,7 @@ async def initialize_native_schema(binary: str, root: DisposableNativeRoot) -> P
     process = None
     try:
         process = await asyncio.create_subprocess_exec(
-            binary, *build_argv("oi-agent/__schema_init__", "oi_bootstrap"),
+            binary, *build_argv("divyachakshu/__schema_init__", "oi_bootstrap"),
             env=environment,
             cwd=str(root.base / "tmp"),
             stdin=asyncio.subprocess.DEVNULL,

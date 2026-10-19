@@ -61,6 +61,47 @@ bot_user_id = 345678901234567890       # the bot's own Discord user id
 post_hourly_cap = 3
 ```
 
+## Install with npm
+
+On Linux or macOS, `oi` installs from npm without any Python setup:
+
+```bash
+npm install -g divyachakshu    # needs Node >= 18; no npm dependencies, no install scripts
+oi --help
+```
+
+The npm package is a thin wrapper around the Python distribution
+[`divyachakshu`](https://pypi.org/project/divyachakshu/). The first `oi` run:
+
+1. finds `uv` (`PATH`, `~/.local/bin`, `~/.cargo/bin`) or installs it with the
+   official installer (`UV_NO_MODIFY_PATH=1`; your `PATH` is not modified);
+2. installs `divyachakshu`, pinned to exactly the npm package's version, with
+   `uv tool install --force --python 3.11` into a private uv root
+   (`~/.local/share/divyachakshu/npm` on Linux, `~/Library/Application
+   Support/divyachakshu/npm` on macOS; `XDG_DATA_HOME` respected), so it never
+   collides with an `oi` you installed yourself;
+3. hands your arguments, stdio, exit code, and SIGINT/SIGTERM/SIGHUP to the
+   installed `oi`.
+
+Later runs reuse the install; it is refreshed only when the pinned version
+changes. `OI_NPM_PACKAGE_SPEC=<spec>` overrides the pin (development hook;
+`scripts/npm-sandbox-smoke.sh` uses it for a locally built wheel). Windows is
+not supported — use WSL2.
+
+## macOS (launchd)
+
+On macOS the daemon runs as a per-user LaunchAgent; Linux systemd behavior is
+unchanged. `oi daemon install` (or `oi init --install-daemon`) writes
+`~/Library/LaunchAgents/ai.divyachakshu.<service_name>.plist` (rendered with
+`plistlib`; `RunAtLoad` + `KeepAlive`; program arguments are the real Python
+`oi` binary with `run --config <path>`; the environment `PATH` includes the
+OpenCode bin dir; stdout/stderr go to `~/Library/Logs/oi/<service_name>.log`),
+then loads it with `launchctl bootstrap gui/<uid>` and starts it. Status and
+logs: `oi daemon status` (`launchctl print gui/<uid>/<label>`) and `oi daemon
+logs` (tail of the log file); `oi daemon uninstall` boots the agent out and
+removes the plist. User mode only: the dedicated-daemon-user system mode
+refuses on macOS with a clear message. Not yet tested on real Mac hardware.
+
 ## Configuration reference
 
 Edit with `oi config set KEY VALUE`, `oi config watch-add ...`, `oi config
@@ -193,6 +234,27 @@ replaced with `[link removed]` and embeds are suppressed.
   provider credential present` — OpenCode returned an empty model listing;
   a warning, not a failure; otherwise `oi doctor` must end in `all checks
   passed`.
+
+## Releasing
+
+A single `v*` tag publishes both packages from GitHub Actions (agents never
+publish):
+
+1. Bump `version` in **both** `pyproject.toml` and `npm/package.json` — they
+   must match; `bash scripts/check-release-versions.sh` enforces it (on a tag
+   push it also requires tag `vX.Y.Z` == version).
+2. Commit, tag `vX.Y.Z`, and push the tag. `release.yml` then:
+   - builds the wheel/sdist and publishes `divyachakshu` to PyPI by trusted
+     publishing (OIDC, `environment: pypi`, no API token), then
+   - publishes the `divyachakshu` npm wrapper with provenance (OIDC, no
+     `NPM_TOKEN`).
+
+One-time bootstrap (owner + maintainer, before the first tagged release):
+register a PyPI *pending trusted publisher* for project `divyachakshu`
+(repo `umiddey/divyachakshu`, workflow `release.yml`, environment `pypi`); create
+the npm package by publishing `divyachakshu` 0.1.0 once by hand; then register
+the npm Trusted Publisher for the same workflow. Every later tag publishes
+from Actions.
 
 ## Development
 

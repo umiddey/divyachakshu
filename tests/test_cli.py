@@ -1668,3 +1668,69 @@ def test_session_forget_invalid_scope_never_changes_mappings(tmp_path, arguments
         assert store.get_opencode_session(111, repo) == "keep-me"
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# macOS launchd routing through the CLI (fake runner; launchctl never runs here)
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_install_darwin_writes_launchagent(tmp_path, monkeypatch):
+    """`oi daemon install` on macOS writes the LaunchAgent plist via launchctl."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    monkeypatch.setattr("oi_agent.daemon.resolve_oi_binary", lambda: "/opt/oi/bin/oi")
+    calls = []
+
+    def fake(command, *, check=False):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("oi_agent.daemon._run", fake)
+    cfg_path, _ = _watch_config(tmp_path)
+    result = runner.invoke(app, [
+        "daemon", "install", "--user-mode", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
+    assert plist_path.is_file()
+    assert ["launchctl", "bootstrap", "gui/501", str(plist_path)] in calls
+
+
+def test_daemon_status_darwin_prints_launchctl_output(monkeypatch):
+    """`oi daemon status` reads the launchd label via `launchctl print`."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    calls = []
+
+    def fake(command, *, check=False):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "pid = 4242", "")
+
+    monkeypatch.setattr("oi_agent.daemon._run", fake)
+    result = runner.invoke(app, ["daemon", "status"])
+    assert result.exit_code == 0, result.output
+    assert "pid = 4242" in result.output
+    assert calls == [["launchctl", "print", "gui/501/ai.divyachakshu.oi"]]
+
+
+def test_daemon_uninstall_darwin_boots_out_and_removes_plist(tmp_path, monkeypatch):
+    """`oi daemon uninstall` on macOS boots out the label and deletes the plist."""
+    monkeypatch.setattr("oi_agent.daemon.is_darwin", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("oi_agent.daemon.os.getuid", lambda: 501)
+    calls = []
+
+    def fake(command, *, check=False):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("oi_agent.daemon._run", fake)
+    plist_path = tmp_path / "Library/LaunchAgents/ai.divyachakshu.oi.plist"
+    plist_path.parent.mkdir(parents=True)
+    plist_path.write_bytes(b"<?xml version='1.0'?><plist version='1.0'/>")
+    result = runner.invoke(app, ["daemon", "uninstall"])
+    assert result.exit_code == 0, result.output
+    assert not plist_path.exists()
+    assert calls == [["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"]]

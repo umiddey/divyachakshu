@@ -1,5 +1,5 @@
 [project]
-name = "oi-agent"
+name = "divyachakshu"
 version = "0.1.0"
 description = "Standalone 24/7 Discord feedback-channel respondent with read-only repo auditing"
 readme = "README.md"
