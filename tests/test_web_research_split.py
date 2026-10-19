@@ -936,8 +936,8 @@ async def test_plain_topic_with_history_link_hands_no_urls_to_runner(
 
 
 @pytest.mark.asyncio
-async def test_current_message_url_stays_without_link_cue(tmp_path, monkeypatch):
-    """The message's own URL is fetched; older history URLs are not."""
+async def test_current_message_url_is_a_cue_for_human_history(tmp_path, monkeypatch):
+    """A URL in the current message cues history URLs too; bot-only drops."""
     watcher = _research_watcher(tmp_path)
     _classifier, research_calls, _decisions = _install_research_spies(
         monkeypatch,
@@ -950,9 +950,16 @@ async def test_current_message_url_stays_without_link_cue(tmp_path, monkeypatch)
     await watcher._apply_research(
         prepared,
         "summarize https://example.com/page please",
-        ["https://history.example/older-post"],
+        [
+            "https://history.example/older-post",
+            "https://bot.example/requoted",
+        ],
+        history_authors_bot=[False, True],
     )
-    assert research_calls[0]["urls"] == ["https://example.com/page"]
+    assert research_calls[0]["urls"] == [
+        "https://example.com/page",
+        "https://history.example/older-post",
+    ]
 
 
 @pytest.mark.asyncio
