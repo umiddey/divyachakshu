@@ -908,3 +908,93 @@ async def test_context_note_records_the_search_query(tmp_path, monkeypatch):
     assert "ICP leads D2C brands" in notes
     assert "inferred" in notes
     assert _ASK_WITHOUT_TOPIC not in notes
+
+
+# --- history URLs only when asked, never from bots (P4) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_plain_topic_with_history_link_hands_no_urls_to_runner(
+    tmp_path, monkeypatch
+):
+    """A plain topic researches the query without any history URL."""
+    watcher = _research_watcher(tmp_path)
+    _classifier, research_calls, _decisions = _install_research_spies(
+        monkeypatch,
+        watcher,
+        classifier_payload=(
+            '{"research": true, "query": "oi agent features", "inferred": false}'
+        ),
+    )
+    prepared = PreparedExternal()
+    await watcher._apply_research(
+        prepared,
+        "what is the oi agent about",
+        ["https://github.com/umiddey/oi-agent its open source, so enjoy"],
+    )
+    assert research_calls[0]["urls"] == []
+
+
+@pytest.mark.asyncio
+async def test_current_message_url_stays_without_link_cue(tmp_path, monkeypatch):
+    """The message's own URL is fetched; older history URLs are not."""
+    watcher = _research_watcher(tmp_path)
+    _classifier, research_calls, _decisions = _install_research_spies(
+        monkeypatch,
+        watcher,
+        classifier_payload=(
+            '{"research": true, "query": "example page summary", "inferred": false}'
+        ),
+    )
+    prepared = PreparedExternal()
+    await watcher._apply_research(
+        prepared,
+        "summarize https://example.com/page please",
+        ["https://history.example/older-post"],
+    )
+    assert research_calls[0]["urls"] == ["https://example.com/page"]
+
+
+@pytest.mark.asyncio
+async def test_link_ask_passes_human_links_and_drops_bot_links(
+    tmp_path, monkeypatch
+):
+    """A link ask fetches human-posted history links; bot-posted ones drop."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, _decisions = _install_research_spies(
+        monkeypatch, watcher, classifier_payload='{"research": false, "query": ""}'
+    )
+    prepared = PreparedExternal()
+    await watcher._apply_research(
+        prepared,
+        "check these links",
+        [
+            "https://example.com/human",
+            "https://bot.example/requoted",
+        ],
+        history_authors_bot=[False, True],
+    )
+    assert classifier_calls == []
+    assert research_calls[0]["urls"] == ["https://example.com/human"]
+    assert "https://bot.example/requoted" not in research_calls[0]["urls"]
+
+
+@pytest.mark.asyncio
+async def test_bot_only_links_do_not_force_research(tmp_path, monkeypatch):
+    """Links named with only bot-posted history URLs stay a classifier ask."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, decisions = _install_research_spies(
+        monkeypatch, watcher, classifier_payload='{"research": false, "query": ""}'
+    )
+    prepared = PreparedExternal()
+    sources, researched = await watcher._apply_research(
+        prepared,
+        "go through these links",
+        ["https://bot.example/requoted"],
+        history_authors_bot=[True],
+    )
+    assert len(classifier_calls) == 1
+    assert decisions[0].forced is False
+    assert decisions[0].research is False
+    assert research_calls == []
+    assert researched is False

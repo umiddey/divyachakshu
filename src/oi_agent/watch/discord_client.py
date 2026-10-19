@@ -42,6 +42,7 @@ from ..external.research import (
     fill_research_evidence,
     filter_outbound_urls,
     marker_retry_needed,
+    references_links,
     public_http_urls,
 )
 from ..opencode.runner import OpenCodeRunner, scope_id_for_target
@@ -1005,14 +1006,28 @@ class OIWatcher(discord.Client):
         prepared: PreparedExternal,
         source: str,
         history_texts: list[str],
+        history_authors_bot: Sequence[bool] | None = None,
     ) -> tuple[tuple[str, ...], bool]:
         """Decide and, when needed, run isolated web research.
 
         Disabled mode never calls the classifier. A failed research run is an
-        honest limitation, not a silent repository audit.
+        honest limitation, not a silent repository audit. History URLs are
+        built from human-posted messages only and are handed to the research
+        run only when the current message itself carries a URL or names
+        links/URLs.
         """
         enabled = self._cfg.external_inputs == "read-only"
-        urls = public_http_urls([source, *history_texts])
+        if history_authors_bot is None:
+            history_authors_bot = [False] * len(history_texts)
+        human_history = [
+            text
+            for text, from_bot in zip(history_texts, history_authors_bot)
+            if not from_bot
+        ]
+        urls = public_http_urls([source])
+        history_urls = public_http_urls(human_history)
+        if references_links(source) or urls:
+            urls = [*urls, *history_urls]
         decision = await decide_research(
             source,
             enabled=enabled,
@@ -1703,8 +1718,12 @@ class OIWatcher(discord.Client):
                         str(getattr(item, "content", "") or "")
                         for item in (*burst_messages, *context.messages, *reply_messages)
                     ]
+                    history_authors_bot = [
+                        bool(getattr(getattr(item, "author", None), "bot", False))
+                        for item in (*burst_messages, *context.messages, *reply_messages)
+                    ]
                     research_sources, researched = await self._apply_research(
-                        prepared, source, history_texts
+                        prepared, source, history_texts, history_authors_bot
                     )
                     try:
                         if (

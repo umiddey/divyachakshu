@@ -48,6 +48,11 @@ _LINK_REF_RE = re.compile(r"(?i)\b(?:links?|urls?)\b")
 _TRAILING = ".,;:)]"
 
 
+def references_links(text: str) -> bool:
+    """Return True when the message itself names links or URLs."""
+    return _LINK_REF_RE.search(text or "") is not None
+
+
 def new_empty_research_dir() -> Path:
     """Return a fresh empty directory for one research run's working directory."""
     path = Path(tempfile.mkdtemp(prefix="oi-research-cwd-"))
