@@ -353,6 +353,7 @@ class Store:
         Returns:
             None: No return value.
         """
+        db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._conn = sqlite3.connect(db_path, timeout=10, isolation_level=None)
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
