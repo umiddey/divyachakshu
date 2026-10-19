@@ -37,6 +37,19 @@ def main() -> None:
 
     ui_server.install_daemon = fake_install
 
+    # Never read or drive the machine's real oi service from the smoke:
+    # status, logs and restart/pause lifecycle calls all stay in the sandbox.
+    ui_server.service_running = lambda: True
+    ui_server.read_daemon_logs = lambda lines=200: "\n".join(
+        f"smoke-fake log line {i}" for i in range(1, 6)
+    )
+
+    def fake_lifecycle(action, **kwargs):
+        with (smoke_dir / "lifecycle.log").open("a") as fh:
+            fh.write(f"{action}\n")
+
+    ui_server.daemon_lifecycle = fake_lifecycle
+
     real_create = ui_server.create_app
 
     def create_app(config_path, secrets_path, port):
