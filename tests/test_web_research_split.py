@@ -294,7 +294,9 @@ async def test_link_words_without_urls_fall_back_to_classifier(tmp_path, monkeyp
     sources, researched = await watcher._apply_research(
         prepared, "read the links", ["nothing to fetch here"]
     )
-    assert classifier_calls == ["read the links"]
+    assert len(classifier_calls) == 1
+    assert "read the links" in classifier_calls[0]
+    assert "nothing to fetch here" in classifier_calls[0]
     assert decisions[0].forced is False
     assert decisions[0].research is False
     assert research_calls == []
@@ -535,13 +537,16 @@ _OWNER_LEAD_MESSAGE = (
 
 
 @pytest.mark.asyncio
-async def test_plain_language_web_request_forces_research_without_classifier():
-    """The exact missed owner message forces research; the classifier is silent."""
+async def test_plain_language_web_request_runs_research_with_classifier_query():
+    """The exact missed owner message is decided by the classifier, not the brief."""
     calls: list[str] = []
 
     async def complete(text: str) -> str:
         calls.append(text)
-        return '{"research": false, "query": ""}'
+        return (
+            '{"research": true, "query": "retail sector leads US", '
+            '"inferred": false}'
+        )
 
     decision = await decide_research(
         _OWNER_LEAD_MESSAGE, enabled=True, complete=complete
@@ -550,8 +555,8 @@ async def test_plain_language_web_request_forces_research_without_classifier():
     assert decision.forced is True
     assert decision.refusal is None
     assert decision.classifier_failure is False
-    assert decision.query == _OWNER_LEAD_MESSAGE
-    assert calls == []
+    assert decision.query == "retail sector leads US"
+    assert calls == [_OWNER_LEAD_MESSAGE]
 
 
 @pytest.mark.parametrize(
@@ -567,19 +572,22 @@ async def test_plain_language_web_request_forces_research_without_classifier():
     ],
 )
 @pytest.mark.asyncio
-async def test_plain_language_variants_force_research_without_classifier(message):
-    """Every explicit plain-language phrasing forces research, none calls the model."""
+async def test_plain_language_variants_get_the_classifier_query(message):
+    """Every explicit plain-language phrasing researches the model's query."""
     calls: list[str] = []
 
     async def complete(text: str) -> str:
         calls.append(text)
-        return '{"research": false, "query": ""}'
+        return (
+            '{"research": true, "query": "retail sector leads US", '
+            '"inferred": false}'
+        )
 
     decision = await decide_research(message, enabled=True, complete=complete)
     assert decision.research is True
     assert decision.forced is True
-    assert decision.query == message
-    assert calls == []
+    assert decision.query == "retail sector leads US"
+    assert calls == [message]
 
 
 @pytest.mark.asyncio
@@ -637,22 +645,26 @@ async def test_plain_language_request_when_disabled_refuses():
 
 
 @pytest.mark.asyncio
-async def test_owner_lead_message_runs_research_with_whole_message(
+async def test_owner_lead_message_runs_research_with_classifier_query(
     tmp_path, monkeypatch, caplog
 ):
-    """End to end: the deterministic trigger researches the owner message itself."""
+    """End to end: the deterministic trigger researches the classifier's query."""
     watcher = _research_watcher(tmp_path)
     classifier_calls, research_calls, decisions = _install_research_spies(
-        monkeypatch, watcher, classifier_payload='{"research": false, "query": ""}'
+        monkeypatch,
+        watcher,
+        classifier_payload=(
+            '{"research": true, "query": "retail sector leads US", "inferred": false}'
+        ),
     )
     prepared = PreparedExternal()
     with caplog.at_level(logging.INFO):
         sources, researched = await watcher._apply_research(
             prepared, _OWNER_LEAD_MESSAGE, []
         )
-    assert classifier_calls == []
+    assert classifier_calls == [_OWNER_LEAD_MESSAGE]
     assert researched is True
-    assert research_calls[0]["query"] == _OWNER_LEAD_MESSAGE
+    assert research_calls[0]["query"] == "retail sector leads US"
     assert decisions[0].forced is True
     decision_lines = [
         record.getMessage()
@@ -690,3 +702,209 @@ async def test_classifier_agent_gets_steps_to_answer_after_denied_tool(
     result = await runner.classify_web_request("what does invoice_service do")
     assert result is None  # the fake binary never spawns; only the config is captured
     assert captured["steps"] == 3
+
+
+# --- context-inferred search query (P2) ---------------------------------------
+
+
+_RECENT_ICP = [
+    "we're targeting D2C brands using Gorgias",
+    "ICP is D2C brands on Gorgias with 50+ seats",
+]
+_ASK_WITHOUT_TOPIC = "can you research please, Dwight is being a bitch"
+
+
+@pytest.mark.asyncio
+async def test_bare_research_ask_infers_query_from_recent_messages():
+    """A research ask with no topic reads the recent messages for the query."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return (
+            '{"research": true, "query": "ICP leads D2C brands using Gorgias", '
+            '"inferred": true}'
+        )
+
+    decision = await decide_research(
+        _ASK_WITHOUT_TOPIC,
+        enabled=True,
+        complete=complete,
+        recent_messages=[*_RECENT_ICP, _ASK_WITHOUT_TOPIC],
+    )
+    assert decision.research is True
+    assert decision.forced is False
+    assert decision.query == "ICP leads D2C brands using Gorgias"
+    assert decision.inferred is True
+    assert len(calls) == 1
+    assert "CURRENT MESSAGE" in calls[0]
+    assert "RECENT MESSAGES" in calls[0]
+    for line in (*_RECENT_ICP, _ASK_WITHOUT_TOPIC):
+        assert line in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_forced_search_insult_searches_context_not_the_insult():
+    """12:59 UTC shape: a forced !search without a topic searches the context."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return (
+            '{"research": true, "query": "ICP leads D2C brands using Gorgias", '
+            '"inferred": true}'
+        )
+
+    message = (
+        "!search you both are bitches I swear. research properly, "
+        "you have access to internet"
+    )
+    argument = message[len("!search "):]
+    decision = await decide_research(
+        message, enabled=True, complete=complete, recent_messages=_RECENT_ICP
+    )
+    assert decision.research is True
+    assert decision.forced is True
+    assert decision.query == "ICP leads D2C brands using Gorgias"
+    assert len(calls) == 1
+    assert argument in calls[0]
+    for line in _RECENT_ICP:
+        assert line in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_search_ask_without_inferable_topic_refuses_ambiguous():
+    """Nothing searchable in message or context asks 'search for what?'."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": true, "query": "", "inferred": true}'
+
+    forced = await decide_research(
+        "!search whatever", enabled=True, complete=complete
+    )
+    assert forced.research is False
+    assert forced.forced is True
+    assert forced.refusal == REFUSAL_AMBIGUOUS
+
+    natural = await decide_research(
+        "can you research please", enabled=True, complete=complete
+    )
+    assert natural.research is False
+    assert natural.refusal == REFUSAL_AMBIGUOUS
+
+    async def false_complete(text: str) -> str:
+        return '{"research": false, "query": ""}'
+
+    false_verdict = await decide_research(
+        "!search nonsense", enabled=True, complete=false_complete,
+    )
+    assert false_verdict.research is False
+    assert false_verdict.refusal == REFUSAL_AMBIGUOUS
+
+
+@pytest.mark.asyncio
+async def test_forced_command_classifier_failure_searches_cleaned_argument():
+    """A forced command falls back to its own argument when the model fails."""
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return _CLASSIFIER_NARRATION
+
+    decision = await decide_research(
+        "!search mechanical parts suppliers from brand A and brand B",
+        enabled=True,
+        complete=complete,
+    )
+    assert decision.research is True
+    assert decision.forced is True
+    assert decision.refusal is None
+    assert decision.classifier_failure is False
+    assert decision.query == "mechanical parts suppliers from brand A and brand B"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_command_never_calls_the_classifier():
+    calls: list[str] = []
+
+    async def complete(text: str) -> str:
+        calls.append(text)
+        return '{"research": false, "query": ""}'
+
+    decision = await decide_research(
+        "!fetch https://www.python.org/downloads/", enabled=True, complete=complete
+    )
+    assert decision.research is True
+    assert decision.forced is True
+    assert decision.query == "https://www.python.org/downloads/"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_inferred_private_referential_query_refuses():
+    """A context-inferred query that turns private never reaches a search."""
+    async def complete(text: str) -> str:
+        return (
+            '{"research": true, "query": "the token from the last message", '
+            '"inferred": true}'
+        )
+
+    decision = await decide_research(
+        "can you research please",
+        enabled=True,
+        complete=complete,
+        recent_messages=["the token from the last message was rotated"],
+    )
+    assert decision.research is False
+    assert decision.refusal == REFUSAL_PRIVATE
+
+
+@pytest.mark.asyncio
+async def test_research_run_receives_classifier_query_not_chat_text(
+    tmp_path, monkeypatch
+):
+    """The runner's query is the classifier's words, never message or history."""
+    watcher = _research_watcher(tmp_path)
+    classifier_calls, research_calls, _decisions = _install_research_spies(
+        monkeypatch,
+        watcher,
+        classifier_payload=(
+            '{"research": true, "query": "ICP leads D2C brands", "inferred": true}'
+        ),
+    )
+    prepared = PreparedExternal()
+    history = [*_RECENT_ICP]
+    sources, researched = await watcher._apply_research(
+        prepared, _ASK_WITHOUT_TOPIC, history
+    )
+    assert researched is True
+    assert len(classifier_calls) == 1
+    assert "CURRENT MESSAGE" in classifier_calls[0]
+    for line in history:
+        assert line in classifier_calls[0]
+    assert research_calls[0]["query"] == "ICP leads D2C brands"
+    for chat_text in (*history, _ASK_WITHOUT_TOPIC):
+        assert research_calls[0]["query"] != chat_text
+
+
+@pytest.mark.asyncio
+async def test_context_note_records_the_search_query(tmp_path, monkeypatch):
+    """A successful run records what was searched for in the evidence notes."""
+    watcher = _research_watcher(tmp_path)
+    _classifier, research_calls, decisions = _install_research_spies(
+        monkeypatch,
+        watcher,
+        classifier_payload=(
+            '{"research": true, "query": "ICP leads D2C brands", "inferred": true}'
+        ),
+    )
+    prepared = PreparedExternal()
+    await watcher._apply_research(prepared, _ASK_WITHOUT_TOPIC, [*_RECENT_ICP])
+    assert decisions[0].inferred is True
+    notes = " ".join(prepared.inputs.notes)
+    assert "ICP leads D2C brands" in notes
+    assert "inferred" in notes
+    assert _ASK_WITHOUT_TOPIC not in notes

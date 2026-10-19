@@ -10,6 +10,8 @@ Consumer-visible contract (correction 5):
   technical topics whose names merely contain sensitive substrings.
 """
 
+import asyncio
+
 from oi_agent.external.intent import (
     REFUSAL_AMBIGUOUS,
     REFUSAL_PRIVATE,
@@ -169,10 +171,22 @@ def test_multiline_search_command_extracts_topic():
     )
     assert _is_request(result)
     assert result.value == "mechanical parts suppliers from brand A and brand B"
-    decision = command_decision("!search a\nb", enabled=True)
-    assert decision is not None
-    assert decision.research is True
-    assert decision.forced is True
+
+    async def main() -> None:
+        async def complete(text: str) -> str:
+            return (
+                '{"research": true, "query": "mechanical parts suppliers", '
+                '"inferred": false}'
+            )
+
+        decision = await command_decision(
+            "!search a\nb", enabled=True, complete=complete
+        )
+        assert decision is not None
+        assert decision.research is True
+        assert decision.forced is True
+
+    asyncio.run(main())
 
 
 # --- plain-language web-search trigger (deterministic, no classifier) --------

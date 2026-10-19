@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,10 +23,12 @@ from urllib.parse import urlsplit
 from .intent import (
     REFUSAL_AMBIGUOUS,
     REFUSAL_DISABLED,
+    REFUSAL_PRIVATE,
     PublicRefusal,
     PublicRequest,
     extract_public_request,
     is_plain_web_search,
+    is_private_referential,
     plain_web_search_refusal,
 )
 from .records import EvidenceItem, PreparedInputs
@@ -52,16 +55,33 @@ def new_empty_research_dir() -> Path:
     return path
 
 CLASSIFIER_SYSTEM = (
-    "You decide whether a Discord request needs public web research. "
-    "Read only the user request below. Output one JSON object and nothing else, "
-    'exactly {"research": true or false, "query": "short public query or empty"}. '
-    "research=true only when the user is asking for public internet information "
-    "(clients, news, products, pages, current facts outside the repository). "
+    "You decide whether a Discord request needs public web research and you "
+    "write the one search query. Read only the CURRENT MESSAGE and the "
+    "RECENT MESSAGES below. Output one JSON object and nothing else, exactly "
+    '{"research": true or false, "query": "short public query or empty", '
+    '"inferred": true or false}. '
+    "Decide research from the CURRENT MESSAGE only: true when it asks to "
+    "search, research, look up, or find public internet information (clients, "
+    "news, products, pages, current facts outside the repository), or when it "
+    "is an explicit !search/!news/!web command. research=false for repository, "
+    "code, invoice, or file questions. "
+    "Write query from the CURRENT MESSAGE when it names a topic; otherwise "
+    "infer ONE short public search query from the RECENT MESSAGES, giving the "
+    "most recent messages the most weight. The query is a public web search "
+    "query in your own words: never quoted chat, no person names, no URLs, "
+    "no private details. Use an empty query when nothing searchable can be "
+    "inferred, and set inferred=true exactly when the query came from the "
+    "RECENT MESSAGES instead of the CURRENT MESSAGE. "
     'Example: "search for possible clients for contractor portal NRW region" '
-    '-> {"research": true, "query": "possible clients for contractor portal NRW region"}. '
-    "research=false for repository, code, invoice, or file questions. "
-    'Example: "what does invoice_service do" -> {"research": false, "query": ""}. '
-    "Never invent a query the user did not ask."
+    '-> {"research": true, "query": "possible clients for contractor portal '
+    'NRW region", "inferred": false}. '
+    'Example: CURRENT MESSAGE "can you research please" with RECENT MESSAGES '
+    "about finding ICP leads among D2C brands using Gorgias -> "
+    '{"research": true, "query": "ICP leads D2C brands using Gorgias", '
+    '"inferred": true}. '
+    'Example: "what does invoice_service do" -> '
+    '{"research": false, "query": "", "inferred": false}. '
+    "Never invent a query that nothing in the request or recent messages supports."
 )
 
 FORMAT_REMINDER = (
@@ -92,6 +112,7 @@ class ResearchDecision:
     forced: bool = False
     refusal: str | None = None
     classifier_failure: bool = False
+    inferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,12 +125,22 @@ class ResearchResult:
     category: str | None = None
 
 
-def command_decision(message: str, *, enabled: bool) -> ResearchDecision | None:
+async def command_decision(
+    message: str,
+    *,
+    enabled: bool,
+    complete: Complete,
+    recent_messages: Sequence[str] = (),
+) -> ResearchDecision | None:
     """Resolve an explicit ``!search``/``!news``/``!fetch``/``!web`` command.
 
     Returns None when the message is not a forced command. Disabled mode
     never researches and does not call a model. Empty and private-referential
     commands stay honest refusals, matching the existing limitation contract.
+    A topic argument is decided by the classifier like any other ask: the
+    classifier writes the short query (from the argument or, when the
+    argument names none, from the recent messages). URL arguments and
+    ``!fetch`` never call the classifier.
     """
     if not _COMMAND_RE.match(message or ""):
         return None
@@ -118,9 +149,74 @@ def command_decision(message: str, *, enabled: bool) -> ResearchDecision | None:
     outcome = extract_public_request(message)
     if isinstance(outcome, PublicRefusal):
         return ResearchDecision(False, "", forced=True, refusal=outcome.reason)
-    if isinstance(outcome, PublicRequest) and outcome.value.strip():
+    if not isinstance(outcome, PublicRequest) or not outcome.value.strip():
+        return ResearchDecision(False, "", forced=True, refusal=REFUSAL_AMBIGUOUS)
+    if outcome.kind == "url":
         return ResearchDecision(True, outcome.value.strip(), forced=True)
-    return ResearchDecision(False, "", forced=True, refusal=REFUSAL_AMBIGUOUS)
+    argument = outcome.value.strip()
+    return await _classify_request(
+        argument,
+        complete=complete,
+        recent_messages=recent_messages,
+        forced=True,
+        fallback_query=argument,
+    )
+
+
+def _classifier_input(request: str, recent_messages: Sequence[str]) -> str:
+    """Build the classifier prompt: current message plus labelled context.
+
+    With no recent messages the input is the bare request, exactly as before
+    context inference existed.
+    """
+    lines = [text.strip() for text in recent_messages if (text or "").strip()]
+    if not lines:
+        return request
+    recent = "\n".join(f"- {line}" for line in lines)
+    return (
+        f"CURRENT MESSAGE:\n{request}\n\n"
+        "RECENT MESSAGES (most recent last):\n"
+        f"{recent}"
+    )
+
+
+async def _classify_request(
+    request: str,
+    *,
+    complete: Complete,
+    recent_messages: Sequence[str] = (),
+    forced: bool,
+    fallback_query: str | None = None,
+) -> ResearchDecision:
+    """Decide one ask with the tool-free classifier over request plus context.
+
+    The classifier may read the recent channel messages to infer ONE short
+    public search query in its own words; that query — never the raw chat —
+    is the only text that can reach a research run. A private-referential
+    query refuses. A forced ask without any usable query refuses honestly;
+    a forced command falls back to its own cleaned argument only when the
+    classifier itself fails.
+    """
+    prompt = _classifier_input(request, recent_messages)
+    decision = parse_classifier_output(await complete(prompt))
+    if decision.classifier_failure:
+        decision = parse_classifier_output(
+            await complete(f"{prompt}\n\n{CLASSIFIER_RETRY_REMINDER}")
+        )
+    if decision.classifier_failure:
+        if fallback_query:
+            return ResearchDecision(True, fallback_query, forced=True)
+        return ResearchDecision(False, "", forced=forced, classifier_failure=True)
+    if decision.research is not True:
+        if forced:
+            return ResearchDecision(False, "", forced=True, refusal=REFUSAL_AMBIGUOUS)
+        return ResearchDecision(False, "")
+    query = decision.query.strip()
+    if not query:
+        return ResearchDecision(False, "", forced=forced, refusal=REFUSAL_AMBIGUOUS)
+    if is_private_referential(query):
+        return ResearchDecision(False, "", forced=forced, refusal=REFUSAL_PRIVATE)
+    return ResearchDecision(True, query, forced=forced, inferred=decision.inferred)
 
 
 def _classifier_payload(raw: str | None) -> dict | None:
@@ -160,7 +256,7 @@ def parse_classifier_output(raw: str | None) -> ResearchDecision:
     if not isinstance(query, str):
         query = ""
     query = " ".join(query.split())[:200]
-    return ResearchDecision(True, query)
+    return ResearchDecision(True, query, inferred=payload.get("inferred") is True)
 
 
 def parse_research_output(raw: str | None, *, max_chars: int, max_sources: int) -> ResearchResult:
@@ -208,27 +304,30 @@ async def decide_research(
     enabled: bool,
     complete: Complete,
     history_urls: Iterable[str] = (),
+    recent_messages: Sequence[str] = (),
 ) -> ResearchDecision:
     """Decide research deterministically when possible, else one classifier call.
 
     ``external_inputs`` disabled never calls ``complete`` and never researches.
-    Forced commands never call it either. An explicit plain-language web-search
+    URL commands never call it either. An explicit plain-language web-search
     request (``search the internet ...``, ``google ...``, ``look up ...
-    online``) forces research with the whole message as the brief — or refuses
-    honestly for a private-referential or repository-internal subject — and
-    also never calls the classifier. A message that refers to links
-    (``link``/``links``/``url``/``urls``, any case, including German
-    ``Link``/``Links``) with a non-empty public history is forced research
-    too. The classifier answers only ambiguous messages; an unusable verdict
-    is retried once with a strict-JSON reminder, and if it still fails the
-    decision carries ``classifier_failure`` so the caller never silently
-    answers without research.
+    online``) refuses honestly for a private-referential or repository-internal
+    subject and otherwise goes through the classifier like any other ask. A
+    message that refers to links (``link``/``links``/``url``/``urls``, any
+    case, including German ``Link``/``Links``) with a non-empty public history
+    is forced research on the message itself. The classifier answers everything
+    else; it sees the current message plus the recent channel messages and
+    writes the one short query, so the research run never receives raw chat.
+    An unusable verdict is retried once with a strict-JSON reminder, and if it
+    still fails the decision carries ``classifier_failure`` so the caller never
+    silently answers without research.
     """
     decision = await _resolve_research(
         message,
         enabled=enabled,
         complete=complete,
         history_urls=history_urls,
+        recent_messages=recent_messages,
     )
     # One INFO line per decision. Never the message text.
     logger.info(
@@ -246,9 +345,15 @@ async def _resolve_research(
     enabled: bool,
     complete: Complete,
     history_urls: Iterable[str] = (),
+    recent_messages: Sequence[str] = (),
 ) -> ResearchDecision:
     """Resolve the decision before the per-decision log line in decide_research."""
-    forced = command_decision(message, enabled=enabled)
+    forced = await command_decision(
+        message,
+        enabled=enabled,
+        complete=complete,
+        recent_messages=recent_messages,
+    )
     if forced is not None:
         return forced
     if is_plain_web_search(message):
@@ -257,20 +362,22 @@ async def _resolve_research(
         refusal = plain_web_search_refusal(message)
         if refusal is not None:
             return ResearchDecision(False, "", forced=True, refusal=refusal)
-        return ResearchDecision(True, (message or "").strip(), forced=True)
+        return await _classify_request(
+            (message or "").strip(),
+            complete=complete,
+            recent_messages=recent_messages,
+            forced=True,
+        )
     if not enabled:
         return ResearchDecision(False, "")
     if history_urls and _LINK_REF_RE.search(message or ""):
         return ResearchDecision(True, (message or "").strip(), forced=True)
-    prompt = message or ""
-    decision = parse_classifier_output(await complete(prompt))
-    if decision.classifier_failure:
-        decision = parse_classifier_output(
-            await complete(f"{prompt}\n\n{CLASSIFIER_RETRY_REMINDER}")
-        )
-    if decision.classifier_failure:
-        return ResearchDecision(False, "", classifier_failure=True)
-    return decision
+    return await _classify_request(
+        message or "",
+        complete=complete,
+        recent_messages=recent_messages,
+        forced=False,
+    )
 
 
 def _host_blocked(host: str) -> bool:

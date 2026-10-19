@@ -124,9 +124,7 @@ _LIMITATION_REPLIES = {
         "knowledge."
     ),
     REFUSAL_AMBIGUOUS: (
-        "That looks like a public lookup, but it doesn't name a public topic "
-        "or URL. Reply with a public news topic, web subject, or URL and I'll "
-        "look it up."
+        "Search for what? Send `!search <topic>`."
     ),
     REFUSAL_PRIVATE: (
         "I can't look that up: it refers to private conversation content, and "
@@ -147,6 +145,32 @@ def _limitation_reply(category: str) -> str:
         f"Public retrieval is unavailable right now (retrieval unavailable: "
         f"{category}). This request was not answered from repository knowledge.",
     )
+
+
+# Recent-context bounds for the research classifier: the last <=50 channel
+# messages, newest weighing most, bounded to ~8000 chars of text in total.
+RESEARCH_CONTEXT_MAX_MESSAGES = 50
+RESEARCH_CONTEXT_MAX_CHARS = 8000
+
+
+def _research_context_lines(history_texts: list[str]) -> list[str]:
+    """Bounded recent-context lines for the research classifier.
+
+    Text only, no author ids. The newest messages weigh most: at most the
+    last 50 messages and no more than ~8000 chars in total, dropping the
+    oldest lines first.
+    """
+    lines = [text.strip() for text in history_texts if (text or "").strip()]
+    lines = lines[-RESEARCH_CONTEXT_MAX_MESSAGES:]
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        if kept and total + len(line) + 1 > RESEARCH_CONTEXT_MAX_CHARS:
+            break
+        kept.append(line)
+        total += len(line) + 1
+    kept.reverse()
+    return kept
 
 
 def _resolve_user_mentions(content: str, mentions: list[Any] | None) -> str:
@@ -994,6 +1018,7 @@ class OIWatcher(discord.Client):
             enabled=enabled,
             complete=self._runner.classify_web_request,
             history_urls=urls,
+            recent_messages=_research_context_lines(history_texts),
         )
         if decision.refusal:
             prepared.refusal = decision.refusal
@@ -1012,8 +1037,10 @@ class OIWatcher(discord.Client):
         if not decision.research:
             return (), False
         limit = max(self._cfg.max_external_evidence_items, len(urls))
+        # Only the classifier's short query reaches the research run — never
+        # the raw message or recent chat text.
         result = await self._runner.run_web_research(
-            decision.query or source,
+            decision.query,
             urls,
             max_sources=limit,
         )
@@ -1023,6 +1050,10 @@ class OIWatcher(discord.Client):
                 result,
                 max_sources=limit,
             )
+            note = f"web search query: {decision.query}"
+            if decision.inferred:
+                note += " (inferred from recent messages)"
+            prepared.inputs.notes.append(note)
             self._runner._answer_evidence = prepared
             self._runner._answer_code_question = False
             return result.sources, True

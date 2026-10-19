@@ -164,7 +164,7 @@ class PublicRefusal:
 
 
 # Sensitive subjects that are only private when referenced contextually (see
-# :func:`_is_private_referential`). Product names that merely CONTAIN these
+# :func:`is_private_referential`). Product names that merely CONTAIN these
 # substrings — AWS Secrets Manager, JSON Web Tokens — stay public.
 _SENSITIVE_NOUN_RE = re.compile(
     r"\b(?:tokens?|secrets?|passwords?|credentials?|api[- ]?keys?|"
@@ -204,7 +204,7 @@ _REFERENTIAL_CONTEXT_RE = re.compile(
 )
 
 
-def _is_private_referential(text: str) -> bool:
+def is_private_referential(text: str) -> bool:
     """Return True when the subject references private conversation content.
 
     A sensitive noun alone is not enough: "AWS Secrets Manager" and "JSON Web
@@ -264,7 +264,7 @@ def extract_public_request(message: str) -> PublicRequest | PublicRefusal | None
         return None
     # A private referential subject cannot become an outbound query, but the
     # attempt itself must be answered honestly.
-    if _is_private_referential(topic) or _is_private_referential(text):
+    if is_private_referential(topic) or is_private_referential(text):
         return PublicRefusal(REFUSAL_PRIVATE)
     # Public intent is required: a generic repository "search for <symbol>"
     # is ordinary chat, not a web query.
@@ -298,7 +298,7 @@ def plain_web_search_refusal(message: str) -> str | None:
     text = (message or "").strip()
     if _INTERNAL_ONLY_RE.search(text):
         return REFUSAL_AMBIGUOUS
-    if _is_private_referential(text):
+    if is_private_referential(text):
         return REFUSAL_PRIVATE
     return None
 
@@ -317,7 +317,7 @@ def _from_command(name: str, argument: str) -> PublicRequest | PublicRefusal:
     if name in ("news", "search", "web"):
         if not cleaned:
             return PublicRefusal(REFUSAL_AMBIGUOUS)
-        if _is_private_referential(cleaned):
+        if is_private_referential(cleaned):
             return PublicRefusal(REFUSAL_PRIVATE)
         topic = _clean_topic(cleaned)
         if topic:
