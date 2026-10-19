@@ -58,8 +58,8 @@ fi
 # Throwaway config written through the real CLI (checkout is a git clone,
 # which is all watch-add requires); fake Discord token for the daemon.
 CFG="$TMPD/oi-smoke-config.toml"
-oi config watch-add --channel-id 111 --repo-path "$PWD" --config "$CFG" >/dev/null \
-  || fail "could not write the throwaway config"
+oi config watch-add --channel-id 111 --repo-path "$PWD" --config "$CFG" >"$TMPD/cfg.out" 2>&1 \
+  || { cat "$TMPD/cfg.out" >&2; fail "could not write the throwaway config"; }
 mkdir -p "$HOME/.config/oi"
 printf 'OI_DISCORD_TOKEN=fake-smoke-token\n' > "$HOME/.config/oi/.env"
 
