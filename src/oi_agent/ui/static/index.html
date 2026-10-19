@@ -31,7 +31,7 @@
     <div id="oc-status" class="panel">Checking OpenCode…</div>
     <button id="btn-oc-install" hidden>Install OpenCode</button>
     <div id="oc-error" class="error" hidden></div>
-    <div id="oc-login" hidden>
+    <div id="oc-signin" hidden>
       <h3>Sign in to a provider</h3>
       <button id="btn-oc-login-start">Start provider sign-in</button>
       <div id="oc-integrations"></div>
@@ -40,6 +40,8 @@
         <p><a id="oc-oauth-link" target="_blank" rel="noreferrer">Open the sign-in page</a></p>
         <p id="oc-oauth-state" class="muted">Waiting for you to finish…</p>
       </div>
+    </div>
+    <div id="oc-model-block" hidden>
       <h3>Model</h3>
       <select id="oc-model"></select>
     </div>
@@ -142,6 +144,7 @@
     <div class="error" id="settings-error" hidden></div>
     <div class="ok" id="settings-ok" hidden>Saved. Use “Restart service” to apply.</div>
     <form id="settings-form"></form>
+    <button type="submit" form="settings-form" id="btn-save-settings">Save settings</button>
     <h3>Watched scopes</h3>
     <div id="dash-watches"></div>
     <h3>Replace bot token</h3>

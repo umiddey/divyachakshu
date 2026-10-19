@@ -25,10 +25,20 @@ def openapi_paths() -> set[str]:
     return set(spec.get("paths", {}))
 
 
-def build_fake_opencode_app() -> web.Application:
-    """`opencode serve` stand-in: integration listing, key + OAuth connect."""
+def build_fake_opencode_app(credential_sink=None) -> web.Application:
+    """`opencode serve` stand-in: integration listing, key + OAuth connect.
+
+    ``credential_sink(integration_id, key)`` lets the smoke run mimic the real
+    serve, which stores the credential in OpenCode's native store; tests pass
+    nothing and inspect ``app["oauth_state"]`` instead.
+    """
     app = web.Application()
-    state: dict[str, Any] = {"oauth": {}}
+    state: dict[str, Any] = {"oauth": {}, "credentials": []}
+
+    def store_credential(integration_id: str, key: str) -> None:
+        state["credentials"].append({"integration_id": integration_id})
+        if credential_sink is not None:
+            credential_sink(integration_id, key)
 
     async def integration_list(request: web.Request) -> web.Response:
         return web.json_response({"location": {"directory": "/tmp/fake"}, "data": [{
@@ -46,12 +56,16 @@ def build_fake_opencode_app() -> web.Application:
                 {"_tag": "BadRequest", "message": "key required"}, status=400
             )
         state.setdefault("keys", []).append(body["key"])
+        store_credential(request.match_info["integrationID"], body["key"])
         return web.Response(status=204)
 
     async def connect_oauth(request: web.Request) -> web.Response:
         await request.json()
         attempt = "attempt-1"
-        state["oauth"][attempt] = {"status": "pending"}
+        state["oauth"][attempt] = {
+            "status": "pending",
+            "integration": request.match_info["integrationID"],
+        }
         return web.json_response({"location": {"directory": "/tmp/fake"}, "data": {
             "attemptID": attempt,
             "url": "https://example.invalid/oauth/signin",
@@ -81,6 +95,7 @@ def build_fake_opencode_app() -> web.Application:
             return web.json_response(
                 {"_tag": "BadRequest", "message": "sign-in not finished"}, status=400
             )
+        store_credential(info.get("integration", ""), "oauth-completed")
         return web.Response(status=204)
 
     async def provider_list(request: web.Request) -> web.Response:
