@@ -81,12 +81,18 @@ PRIVATE_VENV_OI="$HOME/Library/Application Support/oi-agent/npm/tools/divyachaks
 grep -qF "$PRIVATE_VENV_OI" "$TMPD/print.txt" \
   || { grep -n "program\|arguments" "$TMPD/print.txt" >&2; fail "LaunchAgent program is not the private Python oi"; }
 
-# launchd must have started it: wait up to ~60s for the log file.
+# launchd must have started it and the bot must get as far as Discord login:
+# with the fake token the only acceptable end is discord.py's LoginFailure.
+# Any earlier crash (e.g. state DB not openable) fails the smoke.
 for _ in $(seq 1 30); do
-  [ -s "$LOG_FILE" ] && break
+  grep -q "LoginFailure" "$LOG_FILE" 2>/dev/null && break
   sleep 2
 done
 [ -s "$LOG_FILE" ] || fail "log file never appeared at $LOG_FILE"
+if ! grep -q "LoginFailure" "$LOG_FILE"; then
+  tail -n 40 "$LOG_FILE" >&2
+  fail "bot did not reach Discord login (expected LoginFailure on the fake token)"
+fi
 
 oi daemon status || fail "daemon status failed"
 oi daemon logs || fail "daemon logs failed"  # non-follow mode: must not hang
