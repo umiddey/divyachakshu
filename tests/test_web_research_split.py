@@ -464,6 +464,67 @@ async def test_unusable_classifier_narration_becomes_honest_limitation(
 
 
 @pytest.mark.asyncio
+async def test_research_run_logs_only_bounded_counts(tmp_path, monkeypatch, caplog):
+    """The run log carries counts only — never query or URL text."""
+    watcher = _research_watcher(tmp_path)
+    _classifier, research_calls, _decisions = _install_research_spies(
+        monkeypatch,
+        watcher,
+        classifier_payload='{"research": true, "query": "retail leads NRW"}',
+    )
+    prepared = PreparedExternal()
+    with caplog.at_level(logging.INFO):
+        await watcher._apply_research(
+            prepared,
+            "please research retail leads from https://example.com/page",
+            ["https://history.example/older"],
+        )
+    assert len(research_calls) == 1
+    run_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "[research] run" in record.getMessage()
+    ]
+    assert len(run_lines) == 1, "exactly one line per research run"
+    line = run_lines[0]
+    assert "ok=True" in line
+    assert "sources=2" in line
+    assert "history_urls=2" in line
+    assert "query_chars=16" in line
+    assert "duration_ms=" in line
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "retail leads" not in message
+        assert "NRW" not in message
+        assert "example.com" not in message
+        assert "history.example" not in message
+
+
+@pytest.mark.asyncio
+async def test_decision_line_carries_query_length_only(tmp_path, monkeypatch, caplog):
+    """The decision log gains query_chars and never the query text."""
+    watcher = _research_watcher(tmp_path)
+    _classifier, research_calls, _decisions = _install_research_spies(
+        monkeypatch,
+        watcher,
+        classifier_payload='{"research": true, "query": "retail leads NRW"}',
+    )
+    prepared = PreparedExternal()
+    with caplog.at_level(logging.INFO):
+        await watcher._apply_research(prepared, "research retail leads please", [])
+    assert len(research_calls) == 1
+    decision_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "research decision" in record.getMessage()
+    ]
+    assert decision_lines and "query_chars=16" in decision_lines[0]
+    for record in caplog.records:
+        assert "retail leads" not in record.getMessage()
+        assert "NRW" not in record.getMessage()
+
+
+@pytest.mark.asyncio
 async def test_classifier_none_reply_becomes_honest_limitation(tmp_path, monkeypatch):
     """A None classifier reply (timeout shape) retries once, then is honest."""
     watcher = _research_watcher(tmp_path)

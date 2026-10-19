@@ -1054,10 +1054,23 @@ class OIWatcher(discord.Client):
         limit = max(self._cfg.max_external_evidence_items, len(urls))
         # Only the classifier's short query reaches the research run — never
         # the raw message or recent chat text.
+        started = time.monotonic()
         result = await self._runner.run_web_research(
             decision.query,
             urls,
             max_sources=limit,
+        )
+        # One bounded metadata line per research run: counts only, never the
+        # query, the message, the summary, or any URL text.
+        logger.info(
+            "[research] run ok=%s category=%s sources=%d history_urls=%d "
+            "query_chars=%d duration_ms=%d",
+            result.ok,
+            result.category or "-",
+            len(result.sources),
+            len(urls),
+            len(decision.query),
+            int((time.monotonic() - started) * 1000),
         )
         if result.ok and (result.summary or result.sources):
             fill_research_evidence(

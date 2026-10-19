@@ -95,10 +95,14 @@ replacement. Defaults:
 
 ## Using the bot in Discord
 
-A message is answered only when it **mentions the bot**, starts with `oi:`,
-or contains the marker `#oi`, `#audit`, or `#bugreport`. Everything else is
-ignored (log reason: `no explicit trigger`). Replies are capped at
-`max_reply_chars` and delivered chunked by default.
+A message is answered only when it **explicitly addresses the bot**: written
+`<@bot-id>` mention markup, a start with `oi:`, the marker `#oi`, `#audit`,
+or `#bugreport`, or the bot's name used as a direct call (`Ultron, …`,
+`hey ultron`, `…, ultron?`). A reply to one of the bot's messages counts
+too, unless it addresses someone else (other `<@…>` markup, or a direct
+call to another member or bot). Everything else is ignored (log reason:
+`no explicit trigger`). Replies are capped at `max_reply_chars` and
+delivered chunked by default.
 
 Conversation sessions are scoped to (conversation, repository) and rotate
 automatically after `max_session_turns` completed deliveries or
@@ -164,9 +168,11 @@ replaced with `[link removed]` and embeds are suppressed.
 
 ## Troubleshooting
 
-- **Bot never replies** — the message had no explicit trigger. It must
-  mention the bot, start with `oi:`, or contain `#oi`, `#audit`, or
-  `#bugreport`; the log line shows `no explicit trigger`.
+- **Bot never replies** — the message did not explicitly address the bot.
+  Write `<@bot-id>` markup, start with `oi:`, use `#oi`, `#audit`, or
+  `#bugreport`, call the bot by name (`Ultron, …`), or reply to one of its
+  messages (a reply addressed to someone else stays silent); the log line
+  shows `no explicit trigger`.
 - **`403` / "Missing Access" in logs** — the bot is not in the configured
   guild (or lacks channel access). OI treats HTTP 401/403/404 as permanent
   and does not retry: invite the bot and check its channel permissions.

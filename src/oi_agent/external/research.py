@@ -336,10 +336,12 @@ async def decide_research(
     )
     # One INFO line per decision. Never the message text.
     logger.info(
-        "[research] research decision research=%s forced=%s classifier_failure=%s",
+        "[research] research decision research=%s forced=%s classifier_failure=%s "
+        "query_chars=%d",
         decision.research,
         decision.forced,
         decision.classifier_failure,
+        len(decision.query),
     )
     return decision
 
