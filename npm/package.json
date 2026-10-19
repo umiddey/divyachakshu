@@ -1,0 +1,31 @@
+{
+  "name": "oi-agent",
+  "version": "0.1.0",
+  "description": "OI: standalone Discord repo-audit bot. Thin npm wrapper; first run installs the Python distribution divyachakshu via uv.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/oi-agent.git"
+  },
+  "bin": {
+    "oi": "bin/oi.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "keywords": [
+    "discord",
+    "bot",
+    "opencode",
+    "code-review"
+  ]
+}
