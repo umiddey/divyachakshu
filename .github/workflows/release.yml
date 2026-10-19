@@ -1,0 +1,43 @@
+# Publishes a v* tag: PyPI (divyachakshu) via trusted publishing, then the
+# npm wrapper (oi-agent) via npm provenance. Both are OIDC-authenticated —
+# no PyPI token and no NPM_TOKEN exist or are used. Agents never publish;
+# the one-time bootstrap is described in README "Releasing".
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  pypi:
+    name: PyPI (divyachakshu)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: tag must equal pyproject and npm versions
+        run: bash scripts/check-release-versions.sh
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm:
+    name: npm (oi-agent)
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org/'
+      # Trusted publishing (OIDC-authenticated PUT) requires npm >= 11.5.
+      - run: npm install -g npm@11.6.2
+      - name: tag must equal pyproject and npm versions
+        run: bash scripts/check-release-versions.sh
+      - run: npm publish --provenance --access public
+        working-directory: npm

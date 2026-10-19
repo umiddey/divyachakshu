@@ -1,0 +1,15 @@
+# Fast PR gate: the daemon/CLI tests covered by this branch's work plus the
+# release version agreement. Deliberately NOT the full test suite.
+name: ci
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: daemon and CLI tests
+        run: uv run pytest tests/test_daemon.py tests/test_cli.py -q
+      - name: release versions agree
+        run: bash scripts/check-release-versions.sh
