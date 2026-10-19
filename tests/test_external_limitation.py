@@ -183,10 +183,10 @@ async def test_disabled_gate_limitation_text_is_honest(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_command_gets_limitation_asking_for_public_topic(
+async def test_ambiguous_command_gets_limitation_asking_for_a_topic(
     tmp_path, monkeypatch
 ):
-    """A bare `!news` asks for a public topic instead of auditing the repo."""
+    """A bare `!news` asks for a topic instead of auditing the repo."""
     watcher = _watcher(tmp_path, external_inputs="read-only")
     channel = FakeChannel(111)
     message = FakeMessage(1, channel, FakeAuthor(7), "<@99> !news", [FakeMention(99)])
@@ -212,7 +212,9 @@ async def test_ambiguous_command_gets_limitation_asking_for_public_topic(
 
     assert run_calls == []
     assert watcher._store.get_opencode_session(111, tmp_path / "repo") is None
-    assert delivered and "public" in delivered[0].lower()
+    assert delivered
+    assert "search for what" in delivered[0].lower()
+    assert "!search <topic>" in delivered[0]
 
 
 @pytest.mark.asyncio
@@ -254,7 +256,11 @@ async def test_private_referential_command_is_refused_without_a_repo_audit(
 async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
     tmp_path, monkeypatch
 ):
-    """A retrieval that fails with no evidence is a limitation, not an audit."""
+    """A retrieval that fails with no evidence is a limitation, not an audit.
+
+    The forced `!news` command goes through the classifier (P2), which names
+    the query; the retrieval run itself then fails with no results.
+    """
     watcher = _watcher(tmp_path, external_inputs="read-only")
     channel = FakeChannel(111)
     message = FakeMessage(
@@ -263,6 +269,9 @@ async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
     channel._history = [message]
     run_calls = []
     delivered = []
+
+    async def classify(message):
+        return '{"research": true, "query": "rust releases"}'
 
     async def failing_research(query, urls, *, max_sources, timeout=180):
         from oi_agent.external.research import ResearchResult
@@ -280,6 +289,7 @@ async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
         delivered.append(chunk)
         return DeliveryResult(ok=True, discord_message_id=999)
 
+    monkeypatch.setattr(watcher._runner, "classify_web_request", classify)
     monkeypatch.setattr(watcher._runner, "run_web_research", failing_research)
     _forbid_retrieval(monkeypatch, "fetch_public_document")
     monkeypatch.setattr(watcher._runner, "run", forbidden_run)
