@@ -30,6 +30,8 @@ from .daemon import (
     DEFAULT_DAEMON_USER,
     DEFAULT_SERVICE_NAME,
     DaemonError,
+    is_darwin,
+    launchd_label,
     stream_logs,
 )
 from .daemon import (
@@ -298,8 +300,11 @@ def init(
         try:
             is_user = os.geteuid() != 0
             install_daemon(cfg, user_mode=is_user, config_path=config, secrets_path=secrets)
-            mode_label = "user" if is_user else "system"
-            console.print(f"[green]installed and started {mode_label} service oi.service[/green]")
+            if is_darwin():
+                console.print(f"[green]installed and started LaunchAgent {launchd_label()}[/green]")
+            else:
+                mode_label = "user" if is_user else "system"
+                console.print(f"[green]installed and started {mode_label} service oi.service[/green]")
         except Exception as exc:
             console.print(f"[yellow]could not auto-install daemon: {exc}[/yellow]")
             console.print("You can install it later with `oi daemon install`.")
@@ -1443,6 +1448,8 @@ def daemon_install(
         )
         if dry_run:
             console.print(rendered)
+        elif is_darwin():
+            console.print(f"[green]installed and started LaunchAgent {launchd_label(service_name)}[/green]")
         else:
             mode_label = "user" if is_user else "system"
             console.print(f"[green]installed and started {mode_label} service {service_name}.service[/green]")
@@ -1497,6 +1504,9 @@ def daemon_logs(
         except DaemonError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1)
+
+
+@daemon_app.command("uninstall")
 def daemon_uninstall(
     purge: bool = typer.Option(False, "--purge", help="Also remove service user account"),
     user: str = typer.Option(DEFAULT_DAEMON_USER, "--user", "-u"),
@@ -1505,7 +1515,10 @@ def daemon_uninstall(
     """Stop, disable, and remove daemon service."""
     try:
         uninstall_daemon(service_name=service_name, purge=purge, user=user)
-        console.print(f"[green]uninstalled {service_name}.service[/green]")
+        if is_darwin():
+            console.print(f"[green]uninstalled LaunchAgent {launchd_label(service_name)}[/green]")
+        else:
+            console.print(f"[green]uninstalled {service_name}.service[/green]")
     except DaemonError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)

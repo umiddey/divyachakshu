@@ -1,11 +1,13 @@
-"""Unprivileged systemd installation and OpenCode-aware daemon diagnostics."""
+"""Unprivileged systemd/launchd installation and OpenCode-aware daemon diagnostics."""
 
 from __future__ import annotations
 
 import os
+import plistlib
 import pwd
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +24,8 @@ from .store import Store
 SERVICE_DIR = Path("/etc/systemd/system")
 DEFAULT_SERVICE_NAME = "oi"
 DEFAULT_DAEMON_USER = "oi"
+LAUNCHD_LABEL_PREFIX = "ai.oi-agent"
+LAUNCHD_LOG_TAIL_LINES = 200
 
 
 class DaemonError(RuntimeError):
@@ -97,11 +101,7 @@ def render_unit(cfg: Config, identity: DaemonIdentity,
         *(Path(p).expanduser().resolve() for target in cfg.watches for p in target.repo_paths if p),
     }
     rw_paths = " ".join(sorted(str(path) for path in read_write))
-    opencode_dir = ""
-    opencode_bin = shutil.which(cfg.opencode_binary) or shutil.which("opencode")
-    if opencode_bin:
-        opencode_dir = f":{Path(opencode_bin).parent}"
-    path_value = f"{Path(oi_binary).parent}:{identity.home}/.local/bin{opencode_dir}:/usr/local/bin:/usr/bin"
+    path_value = _daemon_path_value(cfg, oi_binary, identity.home)
     if user_mode:
         return "\n".join([
             "[Unit]",
@@ -173,6 +173,185 @@ def _run(command: list[str], *, check: bool = False) -> subprocess.CompletedProc
     """Run one fixed system administration argv list."""
     return subprocess.run(command, capture_output=True, text=True,
                           check=check, timeout=120)
+
+
+def is_darwin() -> bool:
+    """True on macOS, where launchd replaces systemd as the service manager."""
+    return sys.platform == "darwin"
+
+
+def launchd_label(service_name: str = DEFAULT_SERVICE_NAME) -> str:
+    """Reverse-DNS LaunchAgent label for one service name."""
+    return f"{LAUNCHD_LABEL_PREFIX}.{service_name}"
+
+
+def resolve_oi_binary() -> str:
+    """Absolute path of the real Python ``oi`` running right now.
+
+    Resolves ``sys.argv[0]`` first so a generated unit/plist never points at
+    the npm node shim, then falls back to a ``PATH`` lookup.
+    """
+    argv0 = sys.argv[0] if sys.argv else ""
+    candidate: Path | None = None
+    if argv0:
+        direct = Path(argv0).expanduser()
+        if direct.is_absolute() or os.sep in argv0:
+            candidate = direct
+        else:
+            found = shutil.which(argv0)
+            candidate = Path(found) if found else None
+    if candidate is not None:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate.absolute()
+        if resolved.is_file():
+            return str(resolved)
+    return shutil.which("oi") or "/usr/local/bin/oi"
+
+
+def _daemon_path_value(cfg: Config, oi_binary: str, home: Path) -> str:
+    """PATH value shared by the systemd unit and the launchd plist."""
+    opencode_bin = shutil.which(cfg.opencode_binary) or shutil.which("opencode")
+    opencode_dir = f":{Path(opencode_bin).parent}" if opencode_bin else ""
+    return f"{Path(oi_binary).parent}:{home}/.local/bin{opencode_dir}:/usr/local/bin:/usr/bin"
+
+
+def _launchd_plist_path(service_name: str = DEFAULT_SERVICE_NAME,
+                        home: Path | None = None) -> Path:
+    """LaunchAgent plist location for one service name."""
+    base = home if home is not None else Path.home()
+    return base / "Library" / "LaunchAgents" / f"{launchd_label(service_name)}.plist"
+
+
+def _launchd_log_path(service_name: str = DEFAULT_SERVICE_NAME,
+                      home: Path | None = None) -> Path:
+    """LaunchAgent stdout/stderr log location for one service name."""
+    base = home if home is not None else Path.home()
+    return base / "Library" / "Logs" / "oi" / f"{service_name}.log"
+
+
+def render_launchd_plist(cfg: Config, *, service_name: str = DEFAULT_SERVICE_NAME,
+                         config_path: Path | None = None,
+                         secrets_path: Path | None = None,
+                         oi_binary: str | None = None,
+                         home: Path | None = None) -> bytes:
+    """Render the LaunchAgent plist as plistlib XML without filesystem actions.
+
+    Args:
+        cfg: Validated OpenCode-only configuration.
+        service_name: Service name appended to the ``ai.oi-agent`` label prefix.
+        config_path: OI config path passed to ``oi run --config``.
+        secrets_path: OI Discord-token env file, exported as ``OI_SECRETS_PATH``.
+        oi_binary: Real Python ``oi`` executable; resolved from the running
+            process when omitted.
+        home: User home root; defaults to the current user's home.
+
+    Returns:
+        Serialized XML plist bytes ready for ``~/Library/LaunchAgents``.
+    """
+    home = Path(home) if home is not None else Path.home()
+    config_path = Path(config_path) if config_path is not None \
+        else home / ".config/oi/config.toml"
+    secrets_path = Path(secrets_path) if secrets_path is not None \
+        else home / ".config/oi/.env"
+    oi_bin = oi_binary or resolve_oi_binary()
+    log_path = _launchd_log_path(service_name, home)
+    payload = {
+        "Label": launchd_label(service_name),
+        "ProgramArguments": [oi_bin, "run", "--config", str(config_path)],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "EnvironmentVariables": {
+            "HOME": str(home),
+            "PATH": _daemon_path_value(cfg, oi_bin, home),
+            "OI_CONFIG_PATH": str(config_path),
+            "OI_SECRETS_PATH": str(secrets_path),
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        },
+        "StandardOutPath": str(log_path),
+        "StandardErrorPath": str(log_path),
+    }
+    return plistlib.dumps(payload, fmt=plistlib.FMT_XML)
+
+
+def _install_launchd(cfg: Config, *, service_name: str = DEFAULT_SERVICE_NAME,
+                     config_path: Path = DEFAULT_CONFIG_PATH,
+                     secrets_path: Path = DEFAULT_SECRETS_PATH,
+                     dry_run: bool = False) -> bytes:
+    """Write the LaunchAgent plist and bootstrap it into the user's GUI domain.
+
+    Raises:
+        DaemonError: If ``launchctl bootstrap`` or ``kickstart`` fails.
+    """
+    home = Path.home()
+    daemon_config = config_path if config_path.exists() else home / ".config/oi/config.toml"
+    daemon_secrets = secrets_path if secrets_path.exists() else home / ".config/oi/.env"
+    plist = render_launchd_plist(cfg, service_name=service_name,
+                                 config_path=daemon_config, secrets_path=daemon_secrets,
+                                 home=home)
+    if dry_run:
+        return plist
+    plist_path = _launchd_plist_path(service_name, home)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_bytes(plist)
+    _launchd_log_path(service_name, home).parent.mkdir(parents=True, exist_ok=True)
+    uid = os.getuid()
+    target = f"gui/{uid}/{launchd_label(service_name)}"
+    # bootout first; "not loaded" failures are expected on fresh installs.
+    _run(["launchctl", "bootout", target])
+    result = _run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise DaemonError(
+            f"launchctl bootstrap failed: {detail}" if detail
+            else "launchctl bootstrap failed"
+        )
+    result = _run(["launchctl", "kickstart", "-k", target])
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise DaemonError(
+            f"launchctl kickstart failed: {detail}" if detail
+            else "launchctl kickstart failed"
+        )
+    return plist
+
+
+def _launchd_lifecycle(action: str, service_name: str) -> str:
+    """Run one non-destructive launchctl status/restart command."""
+    target = f"gui/{os.getuid()}/{launchd_label(service_name)}"
+    command = (["launchctl", "kickstart", "-k", target] if action == "restart"
+               else ["launchctl", "print", target])
+    result = _run(command)
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        raise DaemonError(output or f"launchctl exited {result.returncode}")
+    return output
+
+
+def _launchd_logs(service_name: str) -> str:
+    """Return the tail of the LaunchAgent log file."""
+    log_path = _launchd_log_path(service_name)
+    if not log_path.is_file():
+        raise DaemonError(f"no LaunchAgent log file yet: {log_path}")
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-LAUNCHD_LOG_TAIL_LINES:])
+
+
+def _launchd_stream_logs(service_name: str) -> None:
+    """Follow the LaunchAgent log file interactively without timeout."""
+    try:
+        subprocess.run(["tail", "-f", str(_launchd_log_path(service_name))], check=False)
+    except KeyboardInterrupt:
+        pass
+
+
+def _launchd_uninstall(service_name: str) -> None:
+    """Bootout the LaunchAgent and remove its plist."""
+    _run(["launchctl", "bootout", f"gui/{os.getuid()}/{launchd_label(service_name)}"])
+    plist_path = _launchd_plist_path(service_name)
+    if plist_path.exists():
+        plist_path.unlink()
 
 
 def ensure_user(identity: DaemonIdentity, *, dry_run: bool = False) -> None:
@@ -273,7 +452,7 @@ def install(cfg: Config, *, user: str = DEFAULT_DAEMON_USER,
             dry_run: bool = False,
             service_dir: Path | None = None,
             user_mode: bool = False) -> str:
-    """Provision the daemon user and write/enable a systemd unit.
+    """Provision the daemon service: launchd LaunchAgent on macOS, systemd elsewhere.
 
     Returns:
         Rendered unit text; dry-run callers can print it directly.
@@ -281,10 +460,20 @@ def install(cfg: Config, *, user: str = DEFAULT_DAEMON_USER,
     Raises:
         DaemonError: If root privileges (for system mode), config, or commands are missing.
     """
+    if is_darwin():
+        if not user_mode:
+            raise DaemonError(
+                "macOS supports only the per-user LaunchAgent (user mode); "
+                "the dedicated daemon-user system mode is Linux-only"
+            )
+        return _install_launchd(cfg, service_name=service_name,
+                                config_path=config_path, secrets_path=secrets_path,
+                                dry_run=dry_run).decode("utf-8")
+
     if not user_mode and os.geteuid() != 0 and not dry_run:
         raise DaemonError("daemon install requires root; use sudo or --dry-run")
 
-    oi_bin = shutil.which("oi") or "/usr/local/bin/oi"
+    oi_bin = resolve_oi_binary()
 
     if user_mode:
         actual_user = os.getenv("USER") or pwd.getpwuid(os.getuid()).pw_name
@@ -335,7 +524,10 @@ def install(cfg: Config, *, user: str = DEFAULT_DAEMON_USER,
 
 
 def stream_logs(service_name: str = DEFAULT_SERVICE_NAME, *, user_mode: bool = False) -> None:
-    """Stream journalctl output interactively without timeout."""
+    """Stream journalctl (or the LaunchAgent log on macOS) interactively."""
+    if is_darwin():
+        _launchd_stream_logs(service_name)
+        return
     command = (
         ["journalctl", "--user", "-u", f"{service_name}.service", "-f"]
         if user_mode
@@ -352,6 +544,10 @@ def lifecycle(action: str, service_name: str = DEFAULT_SERVICE_NAME,
     """Run one non-destructive systemd/journalctl lifecycle command."""
     if action not in {"status", "restart", "logs"}:
         raise DaemonError(f"unsupported daemon action: {action}")
+    if is_darwin():
+        if action == "logs":
+            return _launchd_logs(service_name)
+        return _launchd_lifecycle(action, service_name)
     command = (
         ["journalctl", "--user", "-u", f"{service_name}.service", "--no-pager"]
         if action == "logs" and user_mode
@@ -375,6 +571,9 @@ def uninstall(service_name: str = DEFAULT_SERVICE_NAME,
               service_dir: Path | None = None,
               user_mode: bool = False) -> None:
     """Stop/remove a service and optionally remove its dedicated user."""
+    if is_darwin():
+        _launchd_uninstall(service_name)
+        return
     if user_mode:
         _run(["systemctl", "--user", "disable", "--now", f"{service_name}.service"])
         unit_dir = service_dir or (Path.home() / ".config/systemd/user")
