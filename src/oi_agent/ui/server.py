@@ -431,10 +431,10 @@ async def api_opencode_install(request: web.Request) -> web.Response:
     return _json({"ok": True, "version": version})
 
 
-async def api_oc_login_start(request: web.Request) -> web.Response:
-    state: UiServer = request.app["state"]
+async def _ensure_oc_serve(state: UiServer) -> str | web.Response:
+    """Start the private `opencode serve` once; return its base URL or an error."""
     if state.oc_serve:
-        return _json({"ok": True, "base": state.oc_serve["base"]})
+        return str(state.oc_serve["base"])
 
     def start() -> tuple[subprocess.Popen | None, str]:
         paths = resolve_opencode_paths()
@@ -450,8 +450,15 @@ async def api_oc_login_start(request: web.Request) -> web.Response:
     state.oc_serve = {"proc": proc, "base": base, "integration": None}
     if not await _wait_oc_ready(base):
         _stop_oc_serve(state)
-        return _err("private OpenCode server did not become ready", status=502)
-    return _json({"ok": True})
+        return _err("OpenCode did not start. Close this page, run `oi ui` again, and retry.", status=502)
+    return base
+
+
+async def api_oc_login_start(request: web.Request) -> web.Response:
+    base = await _ensure_oc_serve(request.app["state"])
+    if isinstance(base, web.Response):
+        return base
+    return _json({"ok": True, "base": base})
 
 
 async def api_oc_login_stop(request: web.Request) -> web.Response:
@@ -574,7 +581,7 @@ async def api_oc_oauth_complete(request: web.Request) -> web.Response:
 
 async def api_oc_models(request: web.Request) -> web.Response:
     """Model dropdown: providers (with model maps) plus exact model listings."""
-    base = _require_oc_serve(request)
+    base = await _ensure_oc_serve(request.app["state"])
     if isinstance(base, web.Response):
         return base
     models: list[str] = []

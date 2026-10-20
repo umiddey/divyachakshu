@@ -189,6 +189,13 @@ async def test_models_dropdown_lists_provider_models(wizard):
     assert "stepfun/gpt-test" in models
 
 
+async def test_models_dropdown_works_when_provider_already_connected(wizard):
+    # Already-connected users skip sign-in, so login/start never ran.
+    response = await wizard.client.get("/api/opencode/models")
+    data = await response.json()
+    assert response.status == 200, data
+    assert "stepfun/gpt-test" in data["models"]
+
 async def test_login_start_without_opencode_binary_fails_cleanly(wizard, monkeypatch):
     empty_bin = wizard.tmp / "emptybin"
     empty_bin.mkdir()
