@@ -1,6 +1,6 @@
 {
   "name": "divyachakshu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OI: standalone Discord repo-audit bot. Thin npm wrapper; first run installs the Python distribution divyachakshu via uv.",
   "license": "MIT",
   "repository": {
