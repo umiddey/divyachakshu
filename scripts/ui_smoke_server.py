@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO / "tests"))
 def main() -> None:
     smoke_dir = Path(os.environ["SMOKE_DIR"])
     from aiohttp.test_utils import TestServer
+    from aiohttp import web
     from ui_fakes import build_fake_discord_app
 
     from oi_agent import config as oi_config
@@ -49,6 +50,17 @@ def main() -> None:
             fh.write(f"{action}\n")
 
     ui_server.daemon_lifecycle = fake_lifecycle
+
+    # Empty-model case: while the driver holds models-empty, the models
+    # endpoint answers with no models; otherwise the real handler runs.
+    real_models = ui_server.api_oc_models
+
+    async def models_or_empty(request):
+        if (smoke_dir / "models-empty").exists():
+            return web.json_response({"ok": True, "models": []})
+        return await real_models(request)
+
+    ui_server.api_oc_models = models_or_empty
 
     real_create = ui_server.create_app
 

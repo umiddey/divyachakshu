@@ -54,7 +54,7 @@ async function refreshOcStatus() {
       : `OpenCode <b>${st.version}</b> installed. No provider connected yet.`;
     $("oc-signin").hidden = st.authenticated;
     $("oc-model-block").hidden = !st.authenticated;
-    $("btn-oc-next").disabled = !st.authenticated;
+    $("btn-oc-next").disabled = true;
     if (st.authenticated) await loadModels();
   } catch (err) {
     setError("oc-error", String(err.message || err));
@@ -146,7 +146,9 @@ async function loadModels() {
       select.append(opt);
     }
     state.model = select.value || state.model;
+    $("btn-oc-next").disabled = select.options.length === 0;
   } catch (err) {
+    $("btn-oc-next").disabled = true;
     setError("oc-error", String(err.message || err));
   }
 }

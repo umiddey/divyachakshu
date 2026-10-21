@@ -30,10 +30,32 @@ const fail = (msg) => { console.error("SMOKE FAIL: " + msg); process.exit(1); };
   await page.click("#btn-oc-login-start");
   await page.waitForSelector("#oc-integrations .panel");
   await page.fill("#oc-integrations input[type=password]", "smoke-key-1");
-  await page.getByRole("button", { name: "Connect with API key" }).click();
+  // Empty-model case first: the fake models endpoint returns no models, so
+  // Next must stay disabled even though the provider is connected.
+  const emptyFlag = path.join(smokeDir, "models-empty");
+  fs.writeFileSync(emptyFlag, "1");
+  await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith("/api/opencode/models") && r.ok()),
+    page.getByRole("button", { name: "Connect with API key" }).click(),
+  ]);
   await page.waitForFunction(() =>
     document.getElementById("oc-status").textContent.includes("Provider connected"));
+  await page.waitForTimeout(300); // let loadModels apply the empty list
+  if (await page.locator("#oc-model option").count() !== 0) fail("model list not empty");
+  if (await page.isEnabled("#btn-oc-next")) fail("Next enabled with an empty model list");
+  await shot("02b-opencode-no-models.png");
+
+  // Normal case: the fake models endpoint answers with the real list again.
+  fs.rmSync(emptyFlag);
+  await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith("/api/opencode/models") && r.ok()),
+    page.reload(),
+  ]);
+  await page.waitForSelector("#view-welcome:not([hidden])", { timeout: 10000 });
+  await page.click("#btn-start");
+  await page.waitForSelector("#view-opencode:not([hidden])");
   await page.waitForFunction(() => document.getElementById("oc-model").options.length > 0);
+  await page.waitForFunction(() => !document.getElementById("btn-oc-next").disabled);
   await page.selectOption("#oc-model", "stepfun/gpt-test");
   await shot("03-opencode-connected.png");
   await page.click("#btn-oc-next");
