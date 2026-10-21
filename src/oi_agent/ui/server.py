@@ -28,7 +28,7 @@ import aiohttp
 from aiohttp import web
 
 from ..config import Config, WatchTarget, load_config, save_config
-from ..daemon import DEFAULT_SERVICE_NAME, _launchd_log_path, is_darwin
+from ..daemon import DEFAULT_SERVICE_NAME, _launchd_log_path, is_darwin, launchd_label
 from ..daemon import install as install_daemon
 from ..daemon import lifecycle as daemon_lifecycle
 from ..opencode import bootstrap as oc
@@ -743,7 +743,7 @@ async def api_service_install(request: web.Request) -> web.Response:
 def service_running() -> bool | None:
     """True/False when the service manager can answer, None when it cannot."""
     if is_darwin():
-        command = ["launchctl", "print", f"gui/{os.getuid()}/{DEFAULT_SERVICE_NAME}.oi"]
+        command = ["launchctl", "print", f"gui/{os.getuid()}/{launchd_label(DEFAULT_SERVICE_NAME)}"]
     else:
         command = ["systemctl", "--user", "is-active", f"{DEFAULT_SERVICE_NAME}.service"]
     try:

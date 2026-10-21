@@ -231,3 +231,21 @@ async def test_token_replace_writes_0600_and_never_echoes(dash):
 async def test_token_missing_rejected(dash):
     response = await dash.client.post("/api/secrets/token", json={"token": ""})
     assert (await response.json())["ok"] is False
+
+
+def test_service_running_queries_the_launchd_label_daemon_registers(monkeypatch):
+    from types import SimpleNamespace
+
+    from oi_agent.daemon import DEFAULT_SERVICE_NAME, launchd_label
+
+    seen: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        seen.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ui_server, "is_darwin", lambda: True)
+    monkeypatch.setattr(ui_server.os, "getuid", lambda: 501)
+    monkeypatch.setattr(ui_server.subprocess, "run", fake_run)
+    assert ui_server.service_running() is True
+    assert seen == [["launchctl", "print", f"gui/501/{launchd_label(DEFAULT_SERVICE_NAME)}"]]
