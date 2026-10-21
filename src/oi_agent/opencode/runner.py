@@ -60,7 +60,7 @@ from .policy import (
     normalize_write_dirs,
 )
 from .prompt import FINAL_OUTPUT_MARKER, build_prompt, render_evidence_block
-from .provenance import audit_sha, git_pull, mutation_warning, worktree_fingerprint
+from .provenance import audit_sha, git_pull, mutation_warning, staleness_note, worktree_fingerprint
 from .review_snapshots import ReviewSnapshot, ReviewSnapshotError, materialized_review
 from .review_target import (
     PROVIDER_GITHUB,
@@ -1387,7 +1387,7 @@ class OpenCodeRunner:
         repo_states: list[dict[str, Any]] = []
 
         for r in all_roots:
-            pulled = await asyncio.to_thread(git_pull, str(r))
+            pull = await asyncio.to_thread(git_pull, str(r))
             r_sha = audit_sha(r)
             fp_before = worktree_fingerprint(r)
             repo_states.append({
@@ -1395,10 +1395,14 @@ class OpenCodeRunner:
                 "name": r.name,
                 "sha_before": r_sha,
                 "fp_before": fp_before,
-                "pulled": pulled,
+                "pull": pull,
             })
-            if not pulled:
-                freshness.append(f"git pull failed for {r.name} — code may be behind remote")
+            if not pull.ok:
+                logger.warning(
+                    "[provenance] git pull failed repo=%s cause=%s behind=%d",
+                    r.name, pull.cause, pull.behind,
+                )
+                freshness.append(staleness_note(r.name, pull))
             if r_sha.endswith("-dirty"):
                 freshness.append(f"worktree {r.name} has uncommitted changes")
 
