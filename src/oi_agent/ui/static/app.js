@@ -180,19 +180,6 @@ async function checkDiscord() {
 
 /* ---------------- wizard: channels + repos (shared with dashboard) ---------------- */
 
-function watchFromGuild(guild, channelIds, mode) {
-  const watch = {
-    channel_id: 0, guild_id: 0, repos: [], ignored_channels: [],
-    allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3,
-  };
-  if (mode === "guild") {
-    watch.guild_id = Number(guild.id);
-  } else {
-    watch.channel_id = Number(channelIds[0]);
-  }
-  return watch;
-}
-
 async function renderGuilds() {
   const host = $("guilds");
   host.innerHTML = "<p class=\"muted\">Loading servers…</p>";
