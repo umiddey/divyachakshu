@@ -144,6 +144,49 @@ def _classify_pull_failure(output: str) -> tuple[str, tuple[str, ...]]:
     return CAUSE_OTHER, ()
 
 
+def _upstream_blob(repo_path: str, upstream: str, rel: str) -> bytes | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "show", f"{upstream}:{rel}"],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _identical_untracked_blockers(
+    repo_path: str, upstream: str, blocking: tuple[str, ...]
+) -> list[Path]:
+    """Blockers safe to remove: every path must match its upstream blob exactly.
+
+    Returns ``[]`` unless all named paths are plain in-repo files whose bytes
+    equal ``git show <upstream>:<path>``.
+    """
+    root = Path(repo_path).resolve()
+    removable: list[Path] = []
+    for rel in blocking:
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            return []
+        candidate = root / rel_path
+        if root not in candidate.parents and candidate.parent != root:
+            return []
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                return []
+            data = candidate.read_bytes()
+        except OSError:
+            return []
+        blob = _upstream_blob(repo_path, upstream, rel)
+        if blob is None or blob != data:
+            return []
+        removable.append(candidate)
+    return removable
+
+
 def git_pull(repo_path: str) -> PullResult:
     """Refresh a watched clone with a read-scoped fast-forward pull.
 
@@ -170,6 +213,28 @@ def git_pull(repo_path: str) -> PullResult:
             last_pull=last_pull,
         )
     cause, blocking = _classify_pull_failure(f"{outcome.stderr}\n{outcome.stdout}")
+    if cause == CAUSE_UNTRACKED and upstream and blocking:
+        removable = _identical_untracked_blockers(repo_path, upstream, blocking)
+        if removable:
+            try:
+                for stale in removable:
+                    stale.unlink()
+            except OSError:
+                logger.warning("[provenance] identical untracked removal failed")
+            else:
+                logger.info(
+                    "[provenance] removed %d identical untracked file(s)",
+                    len(removable),
+                )
+                retry = _run_pull(repo_path)
+                if retry is not None and retry.returncode == 0:
+                    now = datetime.now(timezone.utc).isoformat()
+                    _LAST_SUCCESSFUL_PULL[memory_key] = now
+                    return PullResult(ok=True, upstream=upstream, last_pull=now)
+                if retry is not None:
+                    cause, blocking = _classify_pull_failure(
+                        f"{retry.stderr}\n{retry.stdout}"
+                    )
     return PullResult(
         ok=False,
         cause=cause,

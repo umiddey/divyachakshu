@@ -124,3 +124,35 @@ def test_missing_upstream_reported(tmp_path):
     assert result.cause == "no_upstream"
     assert result.upstream == ""
     assert result.behind == 0
+
+
+def test_identical_untracked_blocker_heals(tmp_path):
+    remote, seed, clone = _clone_pair(tmp_path)
+    blocker = clone / "docs" / "plans" / "note.md"
+    blocker.parent.mkdir(parents=True)
+    blocker.write_text("identical bytes\n", encoding="utf-8")
+    _upstream_commit_note(seed, remote, "docs/plans/note.md", "identical bytes\n")
+    result = git_pull(str(clone))
+    assert result.ok is True
+    assert result.cause == ""
+    assert result.behind == 0
+    assert "docs/plans/note.md" in _git(clone, "ls-files")
+    assert blocker.read_text(encoding="utf-8") == "identical bytes\n"
+    assert result.last_pull is not None
+
+
+def test_mixed_blockers_change_nothing_on_disk(tmp_path):
+    remote, seed, clone = _clone_pair(tmp_path)
+    (clone / "docs").mkdir()
+    (clone / "docs" / "same.md").write_text("same\n", encoding="utf-8")
+    (clone / "docs" / "diff.md").write_text("local\n", encoding="utf-8")
+    _upstream_commit_note(seed, remote, "docs/same.md", "same\n")
+    _upstream_commit_note(seed, remote, "docs/diff.md", "upstream\n")
+    result = git_pull(str(clone))
+    assert result.ok is False
+    assert result.cause == "untracked_would_be_overwritten"
+    assert set(result.blocking_paths) == {"docs/same.md", "docs/diff.md"}
+    assert (clone / "docs" / "same.md").read_text(encoding="utf-8") == "same\n"
+    assert "docs/same.md" not in _git(clone, "ls-files")
+    assert "docs/diff.md" not in _git(clone, "ls-files")
+    assert result.behind == 2
