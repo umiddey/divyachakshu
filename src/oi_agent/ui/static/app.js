@@ -147,8 +147,10 @@ async function loadModels() {
     }
     state.model = select.value || state.model;
     $("btn-oc-next").disabled = select.options.length === 0;
+    $("oc-model-hint").hidden = select.options.length > 0;
   } catch (err) {
     $("btn-oc-next").disabled = true;
+    $("oc-model-hint").hidden = true;
     setError("oc-error", String(err.message || err));
   }
 }

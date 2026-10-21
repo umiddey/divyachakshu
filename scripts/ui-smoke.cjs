@@ -43,6 +43,7 @@ const fail = (msg) => { console.error("SMOKE FAIL: " + msg); process.exit(1); };
   await page.waitForTimeout(300); // let loadModels apply the empty list
   if (await page.locator("#oc-model option").count() !== 0) fail("model list not empty");
   if (await page.isEnabled("#btn-oc-next")) fail("Next enabled with an empty model list");
+  if (!(await page.isVisible("#oc-model-hint"))) fail("no hint shown for an empty model list");
   await shot("02b-opencode-no-models.png");
 
   // Normal case: the fake models endpoint answers with the real list again.
@@ -56,6 +57,7 @@ const fail = (msg) => { console.error("SMOKE FAIL: " + msg); process.exit(1); };
   await page.waitForSelector("#view-opencode:not([hidden])");
   await page.waitForFunction(() => document.getElementById("oc-model").options.length > 0);
   await page.waitForFunction(() => !document.getElementById("btn-oc-next").disabled);
+  if (await page.isVisible("#oc-model-hint")) fail("hint still shown with a non-empty model list");
   await page.selectOption("#oc-model", "stepfun/gpt-test");
   await shot("03-opencode-connected.png");
   await page.click("#btn-oc-next");
