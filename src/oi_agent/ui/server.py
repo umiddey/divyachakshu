@@ -76,6 +76,8 @@ class UiServer:
         # Private `opencode serve` handle: {"proc": Popen | None, "base": str,
         # "integration": str | None}. None when no login session is open.
         self.oc_serve: dict[str, Any] | None = None
+        # Serialises start-up so two concurrent API calls never launch two servers.
+        self.oc_serve_lock = asyncio.Lock()
 
     @property
     def allowed_hosts(self) -> set[str]:
@@ -433,25 +435,26 @@ async def api_opencode_install(request: web.Request) -> web.Response:
 
 async def _ensure_oc_serve(state: UiServer) -> str | web.Response:
     """Start the private `opencode serve` once; return its base URL or an error."""
-    if state.oc_serve:
-        return str(state.oc_serve["base"])
+    async with state.oc_serve_lock:
+        if state.oc_serve:
+            return str(state.oc_serve["base"])
 
-    def start() -> tuple[subprocess.Popen | None, str]:
-        paths = resolve_opencode_paths()
-        version = oc.check_version(state.opencode_binary(), paths)
-        return start_opencode_serve(version.binary, paths)
+        def start() -> tuple[subprocess.Popen | None, str]:
+            paths = resolve_opencode_paths()
+            version = oc.check_version(state.opencode_binary(), paths)
+            return start_opencode_serve(version.binary, paths)
 
-    try:
-        proc, base = await asyncio.to_thread(start)
-    except oc.OpenCodeBootstrapError as exc:
-        return _err(str(exc))
-    except Exception as exc:  # noqa: BLE001
-        return _err(str(exc))
-    state.oc_serve = {"proc": proc, "base": base, "integration": None}
-    if not await _wait_oc_ready(base):
-        _stop_oc_serve(state)
-        return _err("OpenCode did not start. Close this page, run `oi ui` again, and retry.", status=502)
-    return base
+        try:
+            proc, base = await asyncio.to_thread(start)
+        except oc.OpenCodeBootstrapError as exc:
+            return _err(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        state.oc_serve = {"proc": proc, "base": base, "integration": None}
+        if not await _wait_oc_ready(base):
+            _stop_oc_serve(state)
+            return _err("OpenCode did not start. Close this page, run `oi ui` again, and retry.", status=502)
+        return base
 
 
 async def api_oc_login_start(request: web.Request) -> web.Response:

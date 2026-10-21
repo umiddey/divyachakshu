@@ -390,3 +390,26 @@ async def test_service_install_uses_seam(wizard):
     assert calls[0]["cfg"].environment_mode == "server"
     assert calls[0]["config_path"] == wizard.app["state"].config_path
     assert calls[0]["secrets_path"] == wizard.app["state"].secrets_path
+
+
+async def test_concurrent_oc_calls_start_opencode_serve_once(wizard, tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    fake_opencode_on_path(tmp_path, monkeypatch)
+    base = str(wizard.oc_server.make_url("")).rstrip("/")
+    starts: list[int] = []
+
+    def slow_start(binary, paths):
+        starts.append(1)
+        time.sleep(0.2)  # both callers reach the start check before either finishes
+        return (None, base)
+
+    monkeypatch.setattr(ui_server, "start_opencode_serve", slow_start)
+    login, models = await asyncio.gather(
+        wizard.client.post("/api/opencode/login/start", json={}),
+        wizard.client.get("/api/opencode/models"),
+    )
+    assert login.status == 200
+    assert models.status == 200
+    assert len(starts) == 1
