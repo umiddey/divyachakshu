@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OI — Divyachakshu setup</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main id="app">
+  <header>
+    <h1>OI — Divyachakshu</h1>
+    <p class="muted">Discord bot that audits local repos with OpenCode.</p>
+  </header>
+
+  <section id="view-welcome" class="view" hidden>
+    <h2>Set up OI</h2>
+    <p>This takes about five minutes. You will:</p>
+    <ol>
+      <li>Install OpenCode (the AI harness) and sign in</li>
+      <li>Create the Discord bot and invite it</li>
+      <li>Pick channels and repo folders to watch</li>
+      <li>Start OI in the background</li>
+    </ol>
+    <button id="btn-start" class="primary">Begin</button>
+  </section>
+
+  <section id="view-opencode" class="view" hidden>
+    <h2>1. OpenCode</h2>
+    <p>OpenCode runs the AI model. OI never talks to providers itself.</p>
+    <div id="oc-status" class="panel">Checking OpenCode…</div>
+    <button id="btn-oc-install" hidden>Install OpenCode</button>
+    <div id="oc-error" class="error" hidden></div>
+    <div id="oc-signin" hidden>
+      <h3>Sign in to a provider</h3>
+      <button id="btn-oc-login-start">Start provider sign-in</button>
+      <div id="oc-integrations"></div>
+      <div id="oc-oauth" hidden>
+        <p id="oc-oauth-instructions"></p>
+        <p><a id="oc-oauth-link" target="_blank" rel="noreferrer">Open the sign-in page</a></p>
+        <p id="oc-oauth-state" class="muted">Waiting for you to finish…</p>
+      </div>
+    </div>
+    <div id="oc-model-block" hidden>
+      <h3>Model</h3>
+      <select id="oc-model"></select>
+      <p id="oc-model-hint" class="muted" hidden>No models are available for this provider yet. Check the OpenCode connection above, then reload this step.</p>
+    </div>
+    <footer>
+      <button class="back" data-goto="welcome">Back</button>
+      <button id="btn-oc-next" class="primary" disabled>Next</button>
+    </footer>
+  </section>
+
+  <section id="view-discord" class="view" hidden>
+    <h2>2. Discord bot</h2>
+    <ol>
+      <li>Open the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Discord Developer Portal</a></li>
+      <li>New Application → give it a name → <b>Bot</b> → <b>Reset Token</b> → copy it</li>
+      <li>On the same Bot page, switch on <b>Message Content Intent</b></li>
+      <li>Paste the token below</li>
+    </ol>
+    <label>Bot token <input id="discord-token" type="password" autocomplete="off" placeholder="paste the bot token"></label>
+    <button id="btn-discord-check">Check token</button>
+    <div id="discord-result" class="panel" hidden></div>
+    <div class="error" id="discord-error" hidden></div>
+    <footer>
+      <button class="back" data-goto="opencode">Back</button>
+      <button id="btn-discord-next" class="primary" disabled>Next</button>
+    </footer>
+  </section>
+
+  <section id="view-channels" class="view" hidden>
+    <h2>3. Channels to watch</h2>
+    <div id="guilds"></div>
+    <footer>
+      <button class="back" data-goto="discord">Back</button>
+      <button id="btn-channels-next" class="primary" disabled>Next</button>
+    </footer>
+  </section>
+
+  <section id="view-repos" class="view" hidden>
+    <h2>4. Repositories</h2>
+    <p>Pick the git folders each watched channel may ask about.</p>
+    <button id="btn-repos-scan">Scan home folder for git clones</button>
+    <div id="watch-repos"></div>
+    <footer>
+      <button class="back" data-goto="channels">Back</button>
+      <button id="btn-repos-next" class="primary" disabled>Next</button>
+    </footer>
+  </section>
+
+  <section id="view-behavior" class="view" hidden>
+    <h2>5. Behavior</h2>
+    <label>Personality (how it talks)
+      <textarea id="f-personality" rows="3"></textarea>
+    </label>
+    <label>Environment
+      <select id="f-environment_mode">
+        <option value="workstation">workstation (this laptop/desktop)</option>
+        <option value="server">server (headless machine)</option>
+      </select>
+    </label>
+    <label>Token env var name <input id="f-discord_token_env" value="OI_DISCORD_TOKEN"></label>
+    <div id="watch-caps"></div>
+    <footer>
+      <button class="back" data-goto="repos">Back</button>
+      <button id="btn-behavior-next" class="primary">Next</button>
+    </footer>
+  </section>
+
+  <section id="view-review" class="view" hidden>
+    <h2>6. Review &amp; save</h2>
+    <div id="review" class="panel"></div>
+    <div class="error" id="save-error" hidden></div>
+    <footer>
+      <button class="back" data-goto="behavior">Back</button>
+      <button id="btn-save" class="primary">Save setup</button>
+    </footer>
+  </section>
+
+  <section id="view-service" class="view" hidden>
+    <h2>7. Start in the background</h2>
+    <p>This installs the system service so OI starts at boot and keeps running.</p>
+    <button id="btn-install-service" class="primary">Start in the background</button>
+    <div id="service-result" class="panel" hidden></div>
+    <footer>
+      <button class="back" data-goto="review">Back</button>
+      <button id="btn-open-dashboard" class="primary" hidden>Open dashboard</button>
+    </footer>
+  </section>
+
+  <section id="view-dashboard" class="view" hidden>
+    <h2>Dashboard</h2>
+    <div id="dash-status" class="panel">Loading…</div>
+    <p>
+      <button id="btn-pause">Pause</button>
+      <button id="btn-resume">Resume</button>
+      <button id="btn-restart">Restart service</button>
+      <button id="btn-dash-logs">Refresh logs</button>
+    </p>
+    <pre id="dash-logs" class="logs"></pre>
+
+    <h2>Settings</h2>
+    <div class="error" id="settings-error" hidden></div>
+    <div class="ok" id="settings-ok" hidden>Saved. Use “Restart service” to apply.</div>
+    <form id="settings-form"></form>
+    <button type="submit" form="settings-form" id="btn-save-settings">Save settings</button>
+    <h3>Watched scopes</h3>
+    <div id="dash-watches"></div>
+    <h3>Replace bot token</h3>
+    <label>New token <input id="new-token" type="password" autocomplete="off" placeholder="write-only; never shown"></label>
+    <button id="btn-token">Save token</button>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

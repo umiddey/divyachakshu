@@ -7,6 +7,52 @@ OI owns Discord transport, allowlists, rate caps, and delivery; OpenCode owns
 model, tools, and repository exploration. With `external_inputs = "read-only"`
 it also does public web research in an isolated second run.
 
+## Set up in the browser
+
+No terminal skills needed beyond one command:
+
+```bash
+oi ui
+```
+
+OI prints a link like `http://127.0.0.1:<port>/?t=<token>` and opens it in
+your browser. The one-time token in the link is exchanged for a strict
+session cookie; every page and API request after that is checked against it,
+and the server only ever listens on 127.0.0.1.
+
+The page walks you through the whole setup: install OpenCode and sign in to a
+provider, create the Discord bot (with the exact portal switches), invite it,
+pick channels from lists (no typed IDs), pick repo folders from a scan of
+your home directory, review, save, and start the background service.
+Afterwards the same page is the dashboard: service status, pause/resume,
+restart, the last 200 log lines, every setting in editable form, and a
+write-only field to replace the bot token.
+
+`oi init` offers the same thing interactively:
+
+```
+OI has a setup page in your browser. Press Enter to open it, or type t to
+set up here in the terminal:
+```
+
+Press Enter for the browser, `t` for the classic terminal flow.
+
+**Servers (SSH):** if the machine has no display (or you are connected over
+SSH), `oi ui` does not try to open a browser; it prints the exact tunnel line:
+
+```
+ssh -L <port>:127.0.0.1:<port> <user>@<host>
+```
+
+Run it from your laptop, then open the printed URL there.
+
+**Security notes:** the UI binds to 127.0.0.1 only and refuses other bind
+addresses; requests with a foreign `Host` or `Origin` header are rejected;
+the session cookie is HttpOnly and SameSite=Strict; there are no CORS
+headers and no external assets. Secrets (the Discord token) are never
+returned by any API, never placed in URLs, and never logged — the token is
+written to the secrets file with mode 0600, and log capture is disabled so
+the one-time setup token cannot leak into journal or access logs.
 ## Quick start
 
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and a supported

@@ -58,7 +58,9 @@ from .opencode.bootstrap import (
     model_status,
 )
 from .opencode.paths import resolve_opencode_paths
+from .setup_save import SetupSaveError, apply_setup
 from .store import Store
+from .ui import run_ui
 
 app = typer.Typer(
     help="OpenCode-only OI feedback-channel daemon and operator control CLI."
@@ -177,6 +179,21 @@ def init(
 ) -> None:
     """Create an OpenCode-only config after dependency/auth/model bootstrap."""
     console.print("[bold]OI init[/bold] — ctrl-c aborts.")
+    # Scripted runs (any flag that implies no human at a terminal) keep today's
+    # flow; an interactive tty gets the one-line offer to use the browser UI.
+    if _stdin_isatty() and not (model or install_opencode or yes or install_service):
+        console.print(
+            "OI has a setup page in your browser. Press Enter to open it, "
+            "or type t to set up here in the terminal:"
+        )
+        answer = input().strip().lower()
+        if answer != "t":
+            try:
+                run_ui(config, secrets)
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1) from exc
+            raise typer.Exit(0)
     consent = install_opencode or yes
     try:
         configured_model = _ensure_opencode(model, consent)
@@ -276,21 +293,13 @@ def init(
         console.print("[red]no channels or guilds configured; nothing written[/red]")
         raise typer.Exit(1)
     try:
-        save_config(cfg, config)
-    except ValueError as exc:
+        apply_setup(cfg, discord_token, config, secrets)
+    except SetupSaveError as exc:
         console.print(f"[red]config error: {exc}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]wrote {config}[/green]")
     if discord_token:
-        secrets.parent.mkdir(parents=True, exist_ok=True)
-        secrets.write_text(
-            f"{cfg.discord_token_env}={discord_token}\n", encoding="utf-8"
-        )
-        secrets.chmod(0o600)
         console.print(f"[green]wrote {secrets} (mode 600)[/green]")
-    store = Store(Path(cfg.db_path).expanduser())
-    store.set_installed_at(int(time.time()))
-    store.close()
     should_install = install_service
     if not should_install and sys.stdin.isatty():
         should_install = (
@@ -308,6 +317,25 @@ def init(
         except Exception as exc:
             console.print(f"[yellow]could not auto-install daemon: {exc}[/yellow]")
             console.print("You can install it later with `oi daemon install`.")
+
+
+@app.command()
+def ui(
+    port: int = typer.Option(0, "--port", help="TCP port (default: pick a free port)."),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not open a browser; print the URL."),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (only 127.0.0.1 is allowed)."),
+    config: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c"),
+    secrets: Path = typer.Option(DEFAULT_SECRETS_PATH, "--secrets"),
+) -> None:
+    """Set up and control OI from a local browser page."""
+    try:
+        code = run_ui(config, secrets, port=port, open_browser=not no_browser, host=host)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    raise typer.Exit(code)
+
+
 def _load_or_die(path: Path) -> Config:
     """Load a config or exit with one actionable error."""
     try:

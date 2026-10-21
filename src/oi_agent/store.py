@@ -412,6 +412,19 @@ class Store:
             ("1" if paused else "0",),
         )
 
+    def last_activity(self) -> int:
+        """Newest recorded activity timestamp (post or OpenCode session).
+
+        Bounded metadata only: a unix timestamp, never message content.
+        Returns 0 when nothing has been recorded yet.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(t) FROM ("
+            " SELECT MAX(ts) AS t FROM posts"
+            " UNION ALL SELECT MAX(updated_at) AS t FROM opencode_sessions)"
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
     def get_installed_at(self) -> int:
         """Return unix timestamp when agent was installed/initialized."""
         row = self._conn.execute(
