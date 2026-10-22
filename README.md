@@ -312,3 +312,8 @@ uv run ruff check .      # line length 120
 uv run python -c "import oi_agent"
 ```
 
+Upgrade `uv.lock` only with `scripts/upgrade-lock.sh [--dry-run] [pkg …]`, never
+with a bare `uv lock --upgrade`. The script resolves against releases published
+at least 7 days ago, so a brand-new release cannot enter the lock on the day it
+appears. CI and release install with `--locked` and never re-resolve the lock.
+
