@@ -133,6 +133,17 @@ def check_version(binary: str, paths: OpenCodePaths) -> OpenCodeVersion:
 # Official installer target (curl -fsSL https://opencode.ai/install | bash).
 OFFICIAL_INSTALL_DIR = Path("~/.opencode/bin")
 
+# Magic bytes of native executables: ELF and Mach-O (32/64-bit, both endians,
+# plus fat/universal). Anything else — typically a `#!` script — is a launcher.
+_NATIVE_MAGICS: tuple[bytes, ...] = (
+    b"\x7fELF",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+)
+
 _runtime_binaries: dict[str, str] = {}
 
 
@@ -152,14 +163,46 @@ def _runtime_candidates(binary: str) -> list[Path]:
     return seen
 
 
+def _is_native_binary(path: Path) -> bool:
+    """Return True when the file carries native ELF/Mach-O executable magic.
+
+    PATH candidates are frequently `#!` launcher scripts (npx/mise shims,
+    distro wrappers) that re-resolve the real binary on every invocation and
+    repopulate the npm cache. Reading the first magic bytes classifies them
+    cheaply and without running anything.
+    """
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(4)
+    except OSError:
+        return False
+    return magic in _NATIVE_MAGICS
+
+
+def _ordered_runtime_candidates(binary: str) -> list[Path]:
+    """Rank candidates native executables first, PATH order kept per group.
+
+    Args:
+        binary: Bare executable name to resolve.
+
+    Returns:
+        Resolved candidate paths, native binaries before `#!` scripts.
+    """
+    candidates = _runtime_candidates(binary)
+    native = [path for path in candidates if _is_native_binary(path)]
+    scripts = [path for path in candidates if not _is_native_binary(path)]
+    return [*native, *scripts]
+
+
 def resolve_runtime_binary(binary: str, paths: OpenCodePaths) -> str:
     """Return the first candidate that passes `check_version` in OI's isolation.
 
     The first `opencode` on PATH is often a launcher (npx/mise shims, distro
     wrappers) that installs a different major or breaks under OI's disposable
-    HOME. Every run must use a binary proven to speak the supported contract,
-    so each candidate is version-checked in the isolated environment and the
-    first passing one is cached for the process.
+    HOME. Candidates are tried native executables first (PATH order inside
+    each group), so a real release binary always beats an earlier launcher
+    script. Every tried candidate is version-checked in the isolated
+    environment and the first passing one is cached for the process.
 
     Raises:
         OpenCodeBootstrapError: When no candidate passes, naming each rejection.
@@ -168,7 +211,7 @@ def resolve_runtime_binary(binary: str, paths: OpenCodePaths) -> str:
     if cached is not None:
         return cached
     rejected: list[str] = []
-    for candidate in _runtime_candidates(binary):
+    for candidate in _ordered_runtime_candidates(binary):
         try:
             version = check_version(str(candidate), paths)
         except OpenCodeBootstrapError as exc:
