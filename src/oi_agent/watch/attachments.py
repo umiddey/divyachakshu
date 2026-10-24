@@ -39,15 +39,16 @@ logger = logging.getLogger(__name__)
 # above", "that screenshot", "the documents posted earlier").
 _ATTACHMENT_NOUN_RE = re.compile(
     r"\b(?:attachments?|files?|documents?|images?|screenshots?|pdfs?|"
-    r"docx|uploads?|pictures?)\b",
+    r"docx|uploads?|pictures?|pics?|photos?|Bild(?:er)?|Fotos?)\b",
     re.IGNORECASE,
 )
 _CONTEXT_REFERENCE_RE = re.compile(
     r"\b(?:above|aforementioned|earlier|previous|prior|before|history|"
     r"back then|posted before|sent before|shared earlier|uploaded before|"
-    r"in the (?:thread|conversation|channel|history))\b"
+    r"in the (?:thread|conversation|channel|history)|oben|vorher)\b"
     r"|\b(?:that|this|those|these|the)\s+(?:attachment|file|document|image|"
-    r"screenshot|pdf|docx|upload|picture)s?\b",
+    r"screenshot|pdf|docx|upload|picture|pic|photo)s?\b"
+    r"|\b(?:das|dem|diese[snm]?)\s+(?:Bild(?:er)?|Fotos?)\b",
     re.IGNORECASE,
 )
 

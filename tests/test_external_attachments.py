@@ -152,6 +152,18 @@ def test_context_attachments_opt_in_requires_explicit_reference() -> None:
     assert not context_attachments_requested("search the web for files about caching")
 
 
+def test_pic_photo_bild_foto_count_as_explicit_references() -> None:
+    """pic/photo/Bild/Foto wording counts like image/file references do."""
+    assert context_attachments_requested(
+        "summarize the difference between the one in the pic and Amir's text"
+    )
+    assert context_attachments_requested("what's in this photo")
+    assert context_attachments_requested("the pics above")
+    assert context_attachments_requested("was steht auf dem Bild oben")
+    assert not context_attachments_requested("summarize report.pdf")
+    assert not context_attachments_requested("send me a pic of the dashboard")
+
+
 # --- correction 6: approved CDN policy ---------------------------------------
 
 
