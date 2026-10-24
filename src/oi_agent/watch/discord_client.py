@@ -71,6 +71,11 @@ from .gate import Action, MentionedUser, evaluate
 
 logger = logging.getLogger(__name__)
 EXCERPT_LIMIT = 40
+# Per-line render cap for history evidence lines: Discord's own hard maximum
+# for one message (4,000 chars, Nitro). Any message the watcher admitted fits
+# whole up to here; longer bodies are clipped WITH an explicit marker naming
+# both lengths, never silently truncated.
+HISTORY_LINE_MAX_CHARS = 4000
 BURST_QUIET_SECONDS = 8.0
 # Upper bound on the names the addressee gate inspects for other members.
 _GATE_OTHER_NAMES_LIMIT = 32
@@ -254,7 +259,10 @@ def _message_evidence_line(message: discord.Message, bot_user_id: int = 0) -> st
         bot_user_id (int): Bot identity used to strip session command tokens.
 
     Returns:
-        str: Context line for the conversation history.
+        str: Context line for the conversation history. Bodies up to
+        ``HISTORY_LINE_MAX_CHARS`` render whole; longer ones are clipped with
+        an explicit ``[clipped: <kept> of <total> chars]`` marker so the model
+        never has to guess whether it saw the whole message.
     """
     content = (message.content or "").strip()
     if not getattr(message.author, "bot", False):
@@ -278,7 +286,14 @@ def _message_evidence_line(message: discord.Message, bot_user_id: int = 0) -> st
             evidence.append(f"[embed: {title or desc}]")
     if evidence:
         body = f"{body} {' '.join(evidence)}".strip()
-    return (body or "(attachment/embed)")[:600]
+    text = body or "(attachment/embed)"
+    if len(text) > HISTORY_LINE_MAX_CHARS:
+        total = len(text)
+        text = (
+            f"{text[:HISTORY_LINE_MAX_CHARS]} "
+            f"[clipped: {HISTORY_LINE_MAX_CHARS} of {total} chars]"
+        )
+    return text
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
