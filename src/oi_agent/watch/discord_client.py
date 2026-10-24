@@ -45,7 +45,10 @@ from ..external.research import (
     references_links,
     public_http_urls,
 )
+from ..opencode.bootstrap import resolve_runtime_binary
+from ..opencode.paths import resolve_opencode_paths
 from ..opencode.runner import OpenCodeRunner, scope_id_for_target
+from ..opencode.storage import prune_private_npm
 from ..poster import Poster, split_message
 from ..reflection.engine import ReflectionEngine
 from ..reminders import (
@@ -77,6 +80,8 @@ LEASE_RENEW_INTERVAL_SECONDS = 20
 RETRY_DELAY_SECONDS = 10
 MAX_ATTEMPTS = 5
 REMINDER_POLL_SECONDS = 60
+# Private npm cache prune cadence: at daemon start, then at most once per day.
+STORAGE_PRUNE_INTERVAL_SECONDS = 24 * 60 * 60
 # Documented bound for the in-memory reflection idempotence FIFO (finding B8).
 MAX_TRACKED_REFLECTION_DELIVERIES = 500
 
@@ -502,6 +507,7 @@ class OIWatcher(discord.Client):
         self._channel_cache: dict[int, discord.abc.Messageable] = {}
         self._worker_task: asyncio.Task | None = None
         self._reminder_task: asyncio.Task | None = None
+        self._storage_task: asyncio.Task | None = None
         self._stopping = False
         self._work_event = asyncio.Event()
         self._active_conversation_tasks: dict[int, asyncio.Task] = {}
@@ -613,10 +619,39 @@ class OIWatcher(discord.Client):
             self._reminder_task is None or self._reminder_task.done()
         ):
             self._reminder_task = asyncio.create_task(self._reminder_worker_loop())
+        if self._storage_task is None or self._storage_task.done():
+            self._storage_task = asyncio.create_task(self._storage_prune_loop())
         try:
             await self._reconcile_targets()
         except Exception:
             logger.exception("[watcher] startup reconciliation failed")
+
+    async def _storage_prune_loop(self) -> None:
+        """Prune the private npm cache at start, then at most once per day.
+
+        Returns:
+            None: No return value.
+        """
+        while not self._stopping:
+            self._prune_npm_cache()
+            try:
+                await asyncio.sleep(STORAGE_PRUNE_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
+
+    def _prune_npm_cache(self) -> None:
+        """Bounded private-cache cleanup; never raises into the daemon.
+
+        Returns:
+            None: No return value.
+        """
+        paths = resolve_opencode_paths()
+        try:
+            binary = resolve_runtime_binary(self._cfg.opencode_binary, paths)
+            keep: Path | None = Path(binary)
+        except Exception:  # noqa: BLE001 - cleanup must never break the daemon
+            keep = None
+        prune_private_npm(paths, keep)
 
     async def _reconcile_targets(self) -> None:
         """Discover and reconcile all direct targets, active threads, and archived threads.
@@ -2064,6 +2099,12 @@ class OIWatcher(discord.Client):
         """
         self._stopping = True
         self._work_event.set()
+        if self._storage_task is not None and not self._storage_task.done():
+            self._storage_task.cancel()
+            try:
+                await self._storage_task
+            except asyncio.CancelledError:
+                pass
         if self._reminder_task is not None and not self._reminder_task.done():
             self._reminder_task.cancel()
             try:
