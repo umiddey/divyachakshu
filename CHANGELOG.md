@@ -21,3 +21,16 @@
   `#!` launcher scripts, PATH order preserved within each group. npx/mise
   launchers no longer hit the registry and repopulate the private npm cache
   on every run.
+
+### Fixed
+
+- Discord history evidence lines render admitted messages whole up to
+  Discord's own 4,000-character message maximum instead of silently
+  truncating at 600 characters; longer lines end with an explicit
+  `[clipped: <kept> of <total> chars]` marker so the model never has to
+  guess whether it saw the whole message.
+- "pic", "photo", "Bild(er)" and "Foto(s)" now count as explicit
+  history-attachment references ("the one in the pic", "the pics above",
+  "auf dem Bild oben"), like "the image" already did. Which messages may
+  load attachments is unchanged: still only the rendered, authorized
+  history window on approved Discord CDN hosts.
