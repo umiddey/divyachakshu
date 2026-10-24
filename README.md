@@ -281,6 +281,24 @@ replaced with `[link removed]` and embeds are suppressed.
   a warning, not a failure; otherwise `oi doctor` must end in `all checks
   passed`.
 
+## Disk use
+
+OI keeps its OpenCode runtime in a private root
+(`~/.local/share/oi/opencode/`). OI cleans up after itself:
+
+- At daemon start, and then at most once per day, OI deletes its private
+  npm cache: `home/.npm/_cacache` and every stale `home/.npm/_npx/<hash>`
+  entry, keeping only the one that holds the binary OI currently runs.
+  Each prune logs one bounded `storage prune freed_bytes=<n> removed=<n>`
+  line. Runtime resolution prefers a native `opencode` executable over
+  `#!` launcher scripts (npx/mise shims, distro wrappers), which is what
+  keeps the cache from growing back on every run.
+- Deletion never leaves the private root: targets whose resolved path
+  escapes it (symlinks) are refused, and `data/`, `config/`, and `state/`
+  are never touched.
+- `oi storage` prints the size of each private root (`home/.npm`, `data`,
+  `state`, `cache`) plus the total, in bytes and human units. Read-only.
+
 ## Releasing
 
 A single `v*` tag publishes both packages from GitHub Actions (agents never

@@ -58,6 +58,7 @@ from .opencode.bootstrap import (
     model_status,
 )
 from .opencode.paths import resolve_opencode_paths
+from .opencode.storage import human_bytes, root_usage
 from .setup_save import SetupSaveError, apply_setup
 from .store import Store
 from .ui import run_ui
@@ -383,6 +384,22 @@ def resume(config: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c")) -
     store.set_paused(False)
     store.close()
     console.print("[green]resumed[/green]")
+
+
+@app.command("storage")
+def storage_cmd() -> None:
+    """Show disk use of OI's private OpenCode roots (read-only)."""
+    rows = root_usage(resolve_opencode_paths())
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Root")
+    table.add_column("Bytes", justify="right")
+    table.add_column("Human", justify="right")
+    total = 0
+    for label, _path, size in rows:
+        total += size
+        table.add_row(label, f"{size:,d}", human_bytes(size))
+    table.add_row("total", f"{total:,d}", human_bytes(total))
+    console.print(table)
 
 
 BOOTSTRAP_MAX_MESSAGE_CHARS = DISCORD_MAX_MESSAGE_CHARS

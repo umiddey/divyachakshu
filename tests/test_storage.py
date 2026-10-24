@@ -16,7 +16,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from typer.testing import CliRunner
 
+from oi_agent import cli
+from oi_agent.cli import app
 from oi_agent.config import Config, WatchTarget
 from oi_agent.opencode import bootstrap
 from oi_agent.opencode.paths import OpenCodePaths, resolve_opencode_paths
@@ -25,6 +28,7 @@ from oi_agent.store import Store
 from oi_agent.watch import discord_client
 from oi_agent.watch.discord_client import OIWatcher
 
+runner = CliRunner()
 STORAGE_LOGGER = "oi_agent.opencode.storage"
 
 
@@ -161,3 +165,24 @@ async def test_on_ready_starts_exactly_one_storage_task(tmp_path):
     assert watcher._storage_task is first
     assert not first.done()
     await watcher.close()
+
+
+def test_cli_storage_prints_bytes_and_human_units_per_root(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    _fill(paths.home / ".npm" / "_cacache", 2048)
+    _fill(paths.data_home, 4096)
+    monkeypatch.setattr(cli, "resolve_opencode_paths", lambda: paths)
+    result = runner.invoke(app, ["storage"])
+    assert result.exit_code == 0, result.output
+    for needle in ("home/.npm", "data", "state", "cache", "total", "2,048", "2.0 KiB", "4,096"):
+        assert needle in result.output
+
+
+def test_cli_storage_is_read_only(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    payload = paths.data_home / "payload"
+    _fill(paths.data_home, 10)
+    monkeypatch.setattr(cli, "resolve_opencode_paths", lambda: paths)
+    result = runner.invoke(app, ["storage"])
+    assert result.exit_code == 0, result.output
+    assert payload.exists()
