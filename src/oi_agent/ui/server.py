@@ -258,7 +258,7 @@ _STR_FIELDS = (
 _INT_FIELDS = (
     "max_reply_chars", "opencode_steps", "opencode_timeout_seconds",
     "max_session_turns", "session_ttl_days", "max_context_messages",
-    "max_context_age_days", "reminder_channel_id", "max_external_evidence_items",
+    "max_context_age_days", "max_external_evidence_items",
     "max_attachments", "max_attachment_bytes",
 )
 _LIST_FIELDS = ("write_dirs",)
@@ -281,6 +281,7 @@ def watch_to_dict(wt) -> dict[str, Any]:
         "allowed_channels": list(wt.allowed_channels),
         "bot_user_id": wt.bot_user_id,
         "post_hourly_cap": wt.post_hourly_cap,
+        "reminder_channel_id": wt.reminder_channel_id,
     }
 
 
@@ -332,12 +333,13 @@ def watch_from_payload(payload: Any):
     known = {
         "channel_id", "guild_id", "repos", "ignored_channels",
         "allowed_channels", "bot_user_id", "post_hourly_cap",
+        "reminder_channel_id",
     }
     unknown = set(payload) - known
     if unknown:
         raise ValueError(f"unknown watch keys: {', '.join(sorted(unknown))}")
     ints: dict[str, int] = {}
-    for key in ("channel_id", "guild_id", "bot_user_id"):
+    for key in ("channel_id", "guild_id", "bot_user_id", "reminder_channel_id"):
         ints[key] = _coerce_int(payload, key) if key in payload else 0
     ints["post_hourly_cap"] = _coerce_int(payload, "post_hourly_cap") if "post_hourly_cap" in payload else 3
     lists: dict[str, list[int]] = {}

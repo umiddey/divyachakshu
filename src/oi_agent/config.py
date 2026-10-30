@@ -41,6 +41,7 @@ class WatchTarget:
     bot_user_id: int = 0
     post_hourly_cap: int = 3
     guild_id: int = 0
+    reminder_channel_id: int = 0
     repos: list[str] = field(default_factory=list)
     ignored_channels: list[int] = field(default_factory=list)
     allowed_channels: list[int] = field(default_factory=list)
@@ -106,7 +107,6 @@ class Config:
     session_ttl_days: int = 7
     max_context_messages: int = 200
     max_context_age_days: int = 30
-    reminder_channel_id: int = 0
     external_inputs: str = "disabled"
     max_external_evidence_items: int = 8
     max_attachments: int = 4
@@ -135,6 +135,13 @@ class Config:
         # 2. Fallback to guild-wide targets
         for target in self.watches:
             if target.is_guild_watch and target.matches_channel(channel_id, guild_id):
+                return target
+        return None
+
+    def is_reminder_channel(self, channel_id: int) -> WatchTarget | None:
+        """Return the watch target that owns the given reminder channel, or None."""
+        for target in self.watches:
+            if target.reminder_channel_id > 0 and target.reminder_channel_id == channel_id:
                 return target
         return None
 
@@ -282,6 +289,12 @@ def load_config(
             "Legacy environment_mode 'auto' is deprecated. "
             "Run `oi config set environment_mode workstation` or `oi config set environment_mode server`."
         )
+    if "reminder_channel_id" in raw:
+        _top_level_reminder = _require_int(raw, "reminder_channel_id", 0)
+        if _top_level_reminder != 0:
+            raise ValueError("reminder_channel_id now lives in its [[watch]] entry")
+        # A top-level 0 is accepted (means "unset") and is dropped — never
+        # written back by save_config. No legacy key on Config to refuse.
     cfg = Config(
         discord_token_env=_require_string(raw, "discord_token_env", "OI_DISCORD_TOKEN"),
         db_path=_require_string(raw, "db_path", cfg_default_db()),
@@ -304,7 +317,6 @@ def load_config(
         session_ttl_days=_require_int(raw, "session_ttl_days", 7),
         max_context_messages=_require_int(raw, "max_context_messages", 200),
         max_context_age_days=_require_int(raw, "max_context_age_days", 30),
-        reminder_channel_id=_require_int(raw, "reminder_channel_id", 0),
         external_inputs=_require_string(raw, "external_inputs", "disabled"),
         max_external_evidence_items=_require_int(
             raw, "max_external_evidence_items", 8
@@ -342,6 +354,7 @@ def load_config(
                 ),
                 bot_user_id=_require_int(watch, "bot_user_id", 0),
                 post_hourly_cap=_require_int(watch, "post_hourly_cap", 3),
+                reminder_channel_id=_require_int(watch, "reminder_channel_id", 0),
                 guild_id=_require_int(watch, "guild_id", 0) if has_guild else 0,
                 repos=repos_list,
                 ignored_channels=ignored_list,
@@ -438,18 +451,11 @@ def validate_config(cfg: Config) -> None:
             "max_reply_chars must be <= 2000 when "
             f"reply_delivery='single_message' (got {cfg.max_reply_chars})"
         )
-    if (
-        isinstance(cfg.reminder_channel_id, bool)
-        or not isinstance(cfg.reminder_channel_id, int)
-        or cfg.reminder_channel_id < 0
-    ):
-        raise ValueError(
-            f"reminder_channel_id must be a non-negative integer (got {cfg.reminder_channel_id!r})"
-        )
     if not cfg.watches:
         raise ValueError("at least one watch target is required")
     seen_channels: set[int] = set()
     seen_guilds: set[int] = set()
+    seen_reminder_channels: set[int] = set()
     for target in cfg.watches:
         if isinstance(target.channel_id, bool) or not isinstance(target.channel_id, int) or target.channel_id < 0:
             raise ValueError(f"channel_id must be a non-negative integer (got {target.channel_id!r})")
@@ -505,6 +511,18 @@ def validate_config(cfg: Config) -> None:
             raise ValueError(f"post_hourly_cap must be an integer >= 1 (got {target.post_hourly_cap!r})")
         if isinstance(target.bot_user_id, bool) or not isinstance(target.bot_user_id, int) or target.bot_user_id < 0:
             raise ValueError(f"bot_user_id must be a non-negative integer (got {target.bot_user_id!r})")
+        if (
+            isinstance(target.reminder_channel_id, bool)
+            or not isinstance(target.reminder_channel_id, int)
+            or target.reminder_channel_id < 0
+        ):
+            raise ValueError(
+                f"reminder_channel_id must be a non-negative integer (got {target.reminder_channel_id!r})"
+            )
+        if target.reminder_channel_id > 0:
+            if target.reminder_channel_id in seen_reminder_channels:
+                raise ValueError(f"duplicate reminder_channel_id {target.reminder_channel_id}")
+            seen_reminder_channels.add(target.reminder_channel_id)
 
 
 def cfg_default_db() -> str:
@@ -537,7 +555,6 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"session_ttl_days = {cfg.session_ttl_days}",
         f"max_context_messages = {cfg.max_context_messages}",
         f"max_context_age_days = {cfg.max_context_age_days}",
-        f"reminder_channel_id = {cfg.reminder_channel_id}",
         f"external_inputs = {json.dumps(cfg.external_inputs)}",
         f"max_external_evidence_items = {cfg.max_external_evidence_items}",
         f"max_attachments = {cfg.max_attachments}",
@@ -565,6 +582,8 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
             lines.append(f"bot_user_id = {target.bot_user_id}")
         if target.post_hourly_cap != 3:
             lines.append(f"post_hourly_cap = {target.post_hourly_cap}")
+        if target.reminder_channel_id > 0:
+            lines.append(f"reminder_channel_id = {target.reminder_channel_id}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")

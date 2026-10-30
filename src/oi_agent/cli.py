@@ -898,7 +898,7 @@ def config_show(
         "discord_token_env", "db_path", "personality", "max_reply_chars",
         "reply_delivery", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "environment_mode", "write_mode",
-        "write_dirs", "max_session_turns", "session_ttl_days", "reminder_channel_id",
+        "write_dirs", "max_session_turns", "session_ttl_days",
         "max_context_messages", "max_context_age_days",
         "external_inputs", "max_external_evidence_items", "max_attachments",
         "max_attachment_bytes", "image_inputs",
@@ -913,8 +913,9 @@ def config_show(
         if target.allowed_channels:
             filters.append(f"allowed={target.allowed_channels}")
         filter_str = f" ({', '.join(filters)})" if filters else ""
+        reminder_str = f" | reminder-channel {target.reminder_channel_id}" if target.reminder_channel_id > 0 else ""
         console.print(
-            f"[watch] {scope_str}{filter_str} -> {repos_str} | cap {target.post_hourly_cap}/h"
+            f"[watch] {scope_str}{filter_str} -> {repos_str} | cap {target.post_hourly_cap}/h{reminder_str}"
         )
 
 
@@ -938,7 +939,7 @@ def config_set(
         "db_path", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "environment_mode", "write_mode",
         "write_dirs", "max_session_turns", "session_ttl_days",
-        "max_context_messages", "max_context_age_days", "reminder_channel_id",
+        "max_context_messages", "max_context_age_days",
         "external_inputs", "max_external_evidence_items", "max_attachments",
         "max_attachment_bytes", "image_inputs",
     }
@@ -979,6 +980,7 @@ def config_watch_add(
     allowed_channels: str = typer.Option("", help="comma-separated channel IDs to specifically allow for guild watch"),
     bot_user_id: int = typer.Option(0, help="bot user id (mention trigger)"),
     post_hourly_cap: int = typer.Option(3, help="max replies per hour"),
+    reminder_channel_id: int = typer.Option(0, help="Discord channel ID for this watch's reminder announcements (0 = off)"),
     config: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c"),
 ) -> None:
     """Add or replace one watch target (channel or server-wide guild)."""
@@ -1020,6 +1022,7 @@ def config_watch_add(
         repo_path=resolved_paths[0],
         bot_user_id=bot_user_id,
         post_hourly_cap=post_hourly_cap,
+        reminder_channel_id=reminder_channel_id,
         guild_id=guild_id,
         repos=resolved_paths,
         ignored_channels=ignored_list,

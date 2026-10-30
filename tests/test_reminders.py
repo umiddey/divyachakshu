@@ -71,8 +71,8 @@ def test_render_contains_source_and_targets():
 @pytest.mark.asyncio
 async def test_gateway_intercepts_reminder_without_open_code(tmp_path, monkeypatch):
     """A valid reminder declaration is stored and never enters audit admission."""
-    cfg = Config(reminder_channel_id=200)
-    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99)]
+    cfg = Config()
+    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99, reminder_channel_id=200)]
     watcher = OIWatcher(cfg, Store(tmp_path / "state.db"))
     async def fake_deliver(*args, **kwargs):
         """Accept the acknowledgement without contacting Discord."""
@@ -99,8 +99,8 @@ async def test_gateway_intercepts_reminder_without_open_code(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_tick_reaction_completes_reminder(tmp_path):
     """A human completion tick closes the reminder and prevents due claims."""
-    cfg = Config(reminder_channel_id=200)
-    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99)]
+    cfg = Config()
+    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99, reminder_channel_id=200)]
     store = Store(tmp_path / "state.db")
     store.create_reminder(100, 200, 7, [], 60, now=1)
     watcher = OIWatcher(cfg, store)
@@ -282,8 +282,8 @@ def test_render_one_shot_omits_next_check():
 @pytest.mark.asyncio
 async def test_gateway_intercepts_daily_at_time(tmp_path, monkeypatch):
     """A daily-at-time declaration is stored with schedule fields, no audit."""
-    cfg = Config(reminder_channel_id=200)
-    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99)]
+    cfg = Config()
+    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99, reminder_channel_id=200)]
     watcher = OIWatcher(cfg, Store(tmp_path / "state.db"))
     sent_chunks: list[str] = []
 
