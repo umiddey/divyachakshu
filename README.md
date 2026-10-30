@@ -172,13 +172,12 @@ replacement. Defaults:
 | `session_ttl_days` | `7` | Idle days before rotation; `0` disables idle rotation only. |
 | `max_context_messages` | `200` (max 1000) | Bounded history window shown to the model. |
 | `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
-| `reminder_channel_id` | `0` | Channel that receives posted reminders (`0` = off). |
 | `external_inputs` | `disabled` | `disabled` or `read-only` (public web research; see below). |
 | `max_external_evidence_items` | `8` (1–50) | Cap on evidence items and research source links. |
 | `max_attachments` | `4` (0–16) | Attachments accepted per message. |
 | `max_attachment_bytes` | `8388608` (max 33554432) | Per-attachment byte cap. |
 | `image_inputs` | `off` | `off`, or `on` to pass images as real image files. |
-| `watches` | `[]` | `[[watch]]` entries: `channel_id` or `guild_id`, `repos`, `bot_user_id`, `post_hourly_cap` (default 3), `ignored_channels`, `allowed_channels`. |
+| `watches` | `[]` | `[[watch]]` entries: `channel_id` or `guild_id`, `repos`, `bot_user_id`, `post_hourly_cap` (default 3), `ignored_channels`, `allowed_channels`, `reminder_channel_id` (0 = no reminders in that server). |
 
 ## Using the bot in Discord
 
