@@ -235,7 +235,7 @@ function updateWatchesFromGuilds() {
   document.querySelectorAll("#guilds input[type=checkbox]:checked").forEach((cb) => {
     const gid = cb.dataset.guild;
     if (!guildWatches.has(gid)) {
-      guildWatches.set(gid, { channel_id: 0, guild_id: Number(gid), repos: [], ignored_channels: [], allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3 });
+      guildWatches.set(gid, { channel_id: 0, guild_id: Number(gid), repos: [], ignored_channels: [], allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3, reminder_channel_id: 0 });
     }
   });
   const channelPicks = new Map();
@@ -248,7 +248,7 @@ function updateWatchesFromGuilds() {
   const next = [...guildWatches.values()];
   for (const [gid, channels] of channelPicks) {
     for (const cid of channels) {
-      next.push({ channel_id: cid, guild_id: 0, repos: [], ignored_channels: [], allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3 });
+      next.push({ channel_id: cid, guild_id: 0, repos: [], ignored_channels: [], allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3, reminder_channel_id: 0 });
     }
   }
   state.watches = next;
@@ -342,6 +342,12 @@ function renderCaps() {
     input.value = watch.post_hourly_cap;
     input.oninput = () => { watch.post_hourly_cap = Number(input.value) || 3; };
     l.append(input);
+    const ri = document.createElement("input");
+    ri.type = "number";
+    ri.min = "0";
+    ri.value = watch.reminder_channel_id;
+    ri.oninput = () => { watch.reminder_channel_id = Number(ri.value) || 0; };
+    l.append(document.createTextNode(" reminder channel: "), ri);
     host.append(l);
   });
 }
@@ -453,7 +459,7 @@ const SETTINGS_FIELDS = [
   ["opencode_timeout_seconds", "number"], ["write_mode", "select:read-only,docs-only"],
   ["max_session_turns", "number"], ["session_ttl_days", "number"],
   ["max_context_messages", "number"], ["max_context_age_days", "number"],
-  ["reminder_channel_id", "number"], ["external_inputs", "select:disabled,read-only"],
+  ["external_inputs", "select:disabled,read-only"],
   ["max_external_evidence_items", "number"], ["max_attachments", "number"],
   ["max_attachment_bytes", "number"], ["image_inputs", "select:off,on"],
 ];

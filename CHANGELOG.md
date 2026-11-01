@@ -21,6 +21,11 @@
   `#!` launcher scripts, PATH order preserved within each group. npx/mise
   launchers no longer hit the registry and repopulate the private npm cache
   on every run.
+- Reminders now go to each server's own reminder channel via the per-`[[watch]]`
+  `reminder_channel_id` field (`0` = no reminders in that server). Migrate with
+  `oi config watch-add ... --reminder-channel-id <id>`; a non-zero top-level
+  `reminder_channel_id` is refused at load with a message naming its `[[watch]]`
+  entry as the new home.
 
 ### Fixed
 

@@ -347,3 +347,117 @@ def test_external_inputs_cli_set_show_roundtrip(tmp_path):
     )
     assert bad.exit_code == 1
     assert load_config(path).image_inputs == "on"
+
+
+# --- P1: reminder_channel_id moves from Config to per-watch WatchTarget ----
+
+
+def _reminder_toml(reminder_channel_id: int | None = None) -> str:
+    """Build a minimal valid TOML config with one watch target.
+
+    When ``reminder_channel_id`` is given it is placed inside the ``[[watch]]``
+    table; otherwise it is omitted entirely.
+    """
+    lines = [
+        f'opencode_binary = "{_binary()}"',
+        'opencode_model = "provider/model"',
+        '[[watch]]',
+        'channel_id = 1',
+        'repo_path = "/repo"',
+    ]
+    if reminder_channel_id is not None:
+        lines.append(f"reminder_channel_id = {reminder_channel_id}")
+    return "\n".join(lines) + "\n"
+
+
+def test_reminder_channel_id_parses_per_watch(tmp_path):
+    """A per-watch reminder_channel_id is loaded onto its WatchTarget."""
+    path = tmp_path / "config.toml"
+    path.write_text(_reminder_toml(200), encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.watches[0].reminder_channel_id == 200
+
+
+def test_reminder_channel_id_roundtrips(tmp_path):
+    """A non-zero per-watch reminder_channel_id survives save -> load."""
+    cfg = _valid_config()
+    cfg.watches[0].reminder_channel_id = 200
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    back = load_config(path)
+    assert back.watches[0].reminder_channel_id == 200
+    assert "reminder_channel_id = 200" in path.read_text()
+
+
+def test_reminder_channel_id_zero_not_written(tmp_path):
+    """A zero per-watch reminder_channel_id is omitted from saved TOML."""
+    cfg = _valid_config()
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    assert "reminder_channel_id" not in path.read_text()
+
+
+def test_duplicate_reminder_channel_id_rejected(tmp_path):
+    """Two watches may not claim the same non-zero reminder channel."""
+    path = tmp_path / "dup.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        '[[watch]]\nchannel_id = 1\nrepo_path = "/repo"\n'
+        'reminder_channel_id = 200\n'
+        '[[watch]]\nchannel_id = 2\nrepo_path = "/repo"\n'
+        'reminder_channel_id = 200\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate reminder_channel_id 200"):
+        load_config(path)
+
+
+def test_negative_reminder_channel_id_rejected(tmp_path):
+    """A negative per-watch reminder_channel_id is refused."""
+    cfg = _valid_config()
+    cfg.watches[0].reminder_channel_id = -1
+    with pytest.raises(ValueError, match="reminder_channel_id must be a non-negative integer"):
+        save_config(cfg, tmp_path / "neg.toml")
+
+
+def test_nonzero_top_level_reminder_channel_refused(tmp_path):
+    """A non-zero legacy top-level reminder_channel_id is refused with migration message."""
+    path = tmp_path / "legacy.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        'reminder_channel_id = 200\n'
+        '[[watch]]\nchannel_id = 1\nrepo_path = "/repo"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="reminder_channel_id now lives in its"):
+        load_config(path)
+
+
+def test_top_level_reminder_channel_zero_accepted_and_dropped(tmp_path):
+    """A top-level reminder_channel_id = 0 is accepted and not written back."""
+    path = tmp_path / "zero.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        'reminder_channel_id = 0\n'
+        '[[watch]]\nchannel_id = 1\nrepo_path = "/repo"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    save_config(cfg, path)
+    assert "reminder_channel_id" not in path.read_text()
+
+
+def test_is_reminder_channel_returns_owning_watch():
+    """is_reminder_channel maps a reminder channel to its owning WatchTarget."""
+    cfg = Config(opencode_binary=_binary(), opencode_model="provider/model")
+    cfg.watches = [
+        WatchTarget(channel_id=1, repo_path="/repo", reminder_channel_id=200),
+        WatchTarget(channel_id=2, repo_path="/repo", reminder_channel_id=300),
+    ]
+    assert cfg.is_reminder_channel(200) is cfg.watches[0]
+    assert cfg.is_reminder_channel(300) is cfg.watches[1]
+    assert cfg.is_reminder_channel(999) is None
+    assert cfg.is_reminder_channel(0) is None

@@ -630,7 +630,7 @@ class OIWatcher(discord.Client):
             self._worker_task = asyncio.create_task(self._durable_worker_loop())
         if self._reflection_worker_task is None or self._reflection_worker_task.done():
             self._reflection_worker_task = asyncio.create_task(self._reflection_worker_loop())
-        if self._cfg.reminder_channel_id > 0 and (
+        if any(t.reminder_channel_id > 0 for t in self._cfg.watches) and (
             self._reminder_task is None or self._reminder_task.done()
         ):
             self._reminder_task = asyncio.create_task(self._reminder_worker_loop())
@@ -1263,9 +1263,9 @@ class OIWatcher(discord.Client):
         if admitted_any:
             self._work_event.set()
 
-    def _reminder_bot_id(self) -> int:
-        """Return the configured OI bot ID for the reminder channel."""
-        target = self._cfg.target_for_channel(self._cfg.reminder_channel_id)
+    def _reminder_bot_id(self, channel_id: int) -> int:
+        """Return the configured OI bot ID for the reminder channel owning ``channel_id``."""
+        target = self._cfg.is_reminder_channel(channel_id)
         return int(target.bot_user_id if target and target.bot_user_id else (self.user.id if self.user else 0))
 
     @staticmethod
@@ -1278,9 +1278,8 @@ class OIWatcher(discord.Client):
             for reaction in getattr(message, "reactions", [])
         )
 
-    async def _fetch_reminder_channel(self) -> discord.abc.Messageable | None:
-        """Resolve the configured reminder channel through the gateway cache/API."""
-        channel_id = self._cfg.reminder_channel_id
+    async def _fetch_reminder_channel(self, channel_id: int) -> discord.abc.Messageable | None:
+        """Resolve the given reminder channel through the gateway cache/API."""
         if channel_id <= 0:
             return None
         channel = self._channel_cache.get(channel_id) or self.get_channel(channel_id)
@@ -1298,12 +1297,12 @@ class OIWatcher(discord.Client):
 
     async def _process_reminder_message(self, message: discord.Message) -> bool:
         """Admit a valid reminder declaration and bypass the OpenCode audit path."""
-        if message.channel.id != self._cfg.reminder_channel_id:
+        if self._cfg.is_reminder_channel(message.channel.id) is None:
             return False
         declaration = parse_reminder_declaration(
             message.content or "",
             [getattr(member, "id", 0) for member in getattr(message, "mentions", [])],
-            self._reminder_bot_id(),
+            self._reminder_bot_id(message.channel.id),
         )
         if declaration is None:
             return False
@@ -1358,7 +1357,7 @@ class OIWatcher(discord.Client):
             try:
                 for reminder in self._store.claim_due_reminders():
                     source_id = int(reminder["source_message_id"])
-                    channel = await self._fetch_reminder_channel()
+                    channel = await self._fetch_reminder_channel(reminder["channel_id"])
                     source = None
                     if channel is not None and hasattr(channel, "fetch_message"):
                         try:
@@ -1374,7 +1373,7 @@ class OIWatcher(discord.Client):
                     declaration = parse_reminder_declaration(
                         source.content or "",
                         [getattr(member, "id", 0) for member in getattr(source, "mentions", [])],
-                        self._reminder_bot_id(),
+                        self._reminder_bot_id(reminder["channel_id"]),
                     )
                     if declaration is None:
                         self._store.release_reminder(source_id, retry_at=int(time.time()) + 3_600)
@@ -1424,7 +1423,7 @@ class OIWatcher(discord.Client):
         if str(getattr(payload.emoji, "name", payload.emoji)) not in COMPLETION_EMOJIS:
             return
         reminder = self._store.get_reminder(payload.message_id)
-        if reminder is None or int(payload.user_id) == self._reminder_bot_id():
+        if reminder is None or int(payload.user_id) == self._reminder_bot_id(reminder["channel_id"]):
             return
         self._store.set_reminder_completed(payload.message_id, True)
 
@@ -1433,9 +1432,9 @@ class OIWatcher(discord.Client):
         if str(getattr(payload.emoji, "name", payload.emoji)) not in COMPLETION_EMOJIS:
             return
         reminder = self._store.get_reminder(payload.message_id)
-        if reminder is None or int(payload.user_id) == self._reminder_bot_id():
+        if reminder is None or int(payload.user_id) == self._reminder_bot_id(reminder["channel_id"]):
             return
-        channel = await self._fetch_reminder_channel()
+        channel = await self._fetch_reminder_channel(reminder["channel_id"])
         if channel is None or not hasattr(channel, "fetch_message"):
             return
         try:

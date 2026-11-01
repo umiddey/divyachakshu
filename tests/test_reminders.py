@@ -71,8 +71,8 @@ def test_render_contains_source_and_targets():
 @pytest.mark.asyncio
 async def test_gateway_intercepts_reminder_without_open_code(tmp_path, monkeypatch):
     """A valid reminder declaration is stored and never enters audit admission."""
-    cfg = Config(reminder_channel_id=200)
-    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99)]
+    cfg = Config()
+    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99, reminder_channel_id=200)]
     watcher = OIWatcher(cfg, Store(tmp_path / "state.db"))
     async def fake_deliver(*args, **kwargs):
         """Accept the acknowledgement without contacting Discord."""
@@ -99,8 +99,8 @@ async def test_gateway_intercepts_reminder_without_open_code(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_tick_reaction_completes_reminder(tmp_path):
     """A human completion tick closes the reminder and prevents due claims."""
-    cfg = Config(reminder_channel_id=200)
-    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99)]
+    cfg = Config()
+    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99, reminder_channel_id=200)]
     store = Store(tmp_path / "state.db")
     store.create_reminder(100, 200, 7, [], 60, now=1)
     watcher = OIWatcher(cfg, store)
@@ -282,11 +282,10 @@ def test_render_one_shot_omits_next_check():
 @pytest.mark.asyncio
 async def test_gateway_intercepts_daily_at_time(tmp_path, monkeypatch):
     """A daily-at-time declaration is stored with schedule fields, no audit."""
-    cfg = Config(reminder_channel_id=200)
-    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99)]
+    cfg = Config()
+    cfg.watches = [WatchTarget(channel_id=200, repo_path=str(tmp_path), bot_user_id=99, reminder_channel_id=200)]
     watcher = OIWatcher(cfg, Store(tmp_path / "state.db"))
     sent_chunks: list[str] = []
-
     async def fake_deliver(*args, **kwargs):
         """Capture the acknowledgement without contacting Discord."""
         sent_chunks.append(kwargs.get("chunk", ""))
@@ -309,4 +308,78 @@ async def test_gateway_intercepts_daily_at_time(tmp_path, monkeypatch):
     assert (reminder["at_hour"], reminder["at_minute"]) == (11, 0)
     assert reminder["next_due_at"] > 0
     assert sent_chunks and "every day at 11:00 Europe/Berlin" in sent_chunks[0]
+    watcher._store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_watch_reminder_channels_are_isolated(tmp_path, monkeypatch):
+    """Each watch's reminder declarations are stored with their own channel;
+
+    the worker fetches each reminder's own channel, never another watch's.
+    """
+    channel_a, channel_b = 200, 300
+    cfg = Config()
+    cfg.watches = [
+        WatchTarget(
+            channel_id=channel_a,
+            repo_path=str(tmp_path),
+            bot_user_id=99,
+            reminder_channel_id=channel_a,
+        ),
+        WatchTarget(
+            channel_id=channel_b,
+            repo_path=str(tmp_path),
+            bot_user_id=88,
+            reminder_channel_id=channel_b,
+        ),
+    ]
+
+    # Each reminder channel maps to its own owning watch
+    assert cfg.is_reminder_channel(channel_a) is cfg.watches[0]
+    assert cfg.is_reminder_channel(channel_b) is cfg.watches[1]
+    assert cfg.is_reminder_channel(999) is None
+
+    async def fake_deliver(*args, **kwargs):
+        """Accept the acknowledgement without contacting Discord."""
+        return SimpleNamespace(ok=True, discord_message_id=101)
+
+    store = Store(tmp_path / "state.db")
+    watcher = OIWatcher(cfg, store)
+    monkeypatch.setattr("oi_agent.watch.discord_client.Poster.deliver_chunk", fake_deliver)
+    watcher._channel_cache = {}
+
+    # A declaration in each reminder channel is stored against that channel
+    await watcher.on_message(
+        SimpleNamespace(
+            id=100,
+            channel=SimpleNamespace(id=channel_a),
+            author=SimpleNamespace(id=7),
+            content="<@99> remind <@8> every 10 hours: server A task",
+            mentions=[SimpleNamespace(id=99), SimpleNamespace(id=8)],
+        )
+    )
+    await watcher.on_message(
+        SimpleNamespace(
+            id=200,
+            channel=SimpleNamespace(id=channel_b),
+            author=SimpleNamespace(id=8),
+            content="<@88> remind <@7> every 10 hours: server B task",
+            mentions=[SimpleNamespace(id=88), SimpleNamespace(id=7)],
+        )
+    )
+
+    reminder_a = store.get_reminder(100)
+    reminder_b = store.get_reminder(200)
+    assert reminder_a is not None
+    assert reminder_b is not None
+    assert reminder_a["channel_id"] == channel_a
+    assert reminder_b["channel_id"] == channel_b
+
+    # The worker fetches each reminder's own channel, never the other
+    fetched_a = await watcher._fetch_reminder_channel(reminder_a["channel_id"])
+    fetched_b = await watcher._fetch_reminder_channel(reminder_b["channel_id"])
+    assert fetched_a is not fetched_b
+    assert fetched_a.id == channel_a
+    assert fetched_b.id == channel_b
+
     watcher._store.close()
