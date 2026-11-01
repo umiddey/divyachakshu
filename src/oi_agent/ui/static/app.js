@@ -342,6 +342,12 @@ function renderCaps() {
     input.value = watch.post_hourly_cap;
     input.oninput = () => { watch.post_hourly_cap = Number(input.value) || 3; };
     l.append(input);
+    const ri = document.createElement("input");
+    ri.type = "number";
+    ri.min = "0";
+    ri.value = watch.reminder_channel_id;
+    ri.oninput = () => { watch.reminder_channel_id = Number(ri.value) || 0; };
+    l.append(document.createTextNode(" reminder channel: "), ri);
     host.append(l);
   });
 }

@@ -105,6 +105,7 @@ channel_id = 123456789012345678        # or: guild_id = ... for a whole server
 repos = ["/srv/repos/backend"]
 bot_user_id = 345678901234567890       # the bot's own Discord user id
 post_hourly_cap = 3
+reminder_channel_id = 0    # reminder channel for this server (0 = no reminders here)
 ```
 
 ## Install with npm
