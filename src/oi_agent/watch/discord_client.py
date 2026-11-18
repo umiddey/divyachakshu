@@ -360,6 +360,9 @@ class ConversationContext:
     excerpt: str
     messages: list[discord.Message]
     window_note: str
+    # Count the user asked for when it exceeded the configured clamp, so the
+    # posted reply can say honestly how much history was actually readable.
+    clamped_from: int | None = None
 
 
 async def _fetch_conversation_context(
@@ -370,6 +373,7 @@ async def _fetch_conversation_context(
     *,
     max_messages: int = 0,
     max_age_days: int = 0,
+    clamped_from: int | None = None,
 ) -> ConversationContext:
     """Fetch bounded history and state the real window and any clipping.
 
@@ -419,7 +423,7 @@ async def _fetch_conversation_context(
             getattr(channel, "id", "unknown"),
             exc_info=True,
         )
-        return ConversationContext("", [], "history could not be read")
+        return ConversationContext("", [], "history could not be read", clamped_from)
     header = _window_note(limit, after, max_messages, max_age_days)
     if truncated:
         header += (
@@ -428,7 +432,7 @@ async def _fetch_conversation_context(
         )
     body = "\n".join(lines)
     excerpt = f"{header}\n{body}" if body else header
-    return ConversationContext(excerpt, messages, header)
+    return ConversationContext(excerpt, messages, header, clamped_from)
 
 
 async def _collect_history(
@@ -887,6 +891,7 @@ class OIWatcher(discord.Client):
                     request.count,
                     request.since_days,
                 )
+        clamped_from: int | None = None
         if request is not None:
             limit, after = bounded_window(
                 request,
@@ -894,6 +899,8 @@ class OIWatcher(discord.Client):
                 max_context_age_days=self._cfg.max_context_age_days,
                 default_count=self._cfg.context_messages,
             )
+            if request.count is not None and request.count > limit:
+                clamped_from = request.count
         return await _fetch_conversation_context(
             channel,
             limit,
@@ -901,6 +908,7 @@ class OIWatcher(discord.Client):
             after,
             max_messages=self._cfg.max_context_messages,
             max_age_days=self._cfg.max_context_age_days,
+            clamped_from=clamped_from,
         )
 
     async def _authorized_burst_messages(
@@ -2047,6 +2055,17 @@ class OIWatcher(discord.Client):
                     response_text, has_links = filter_outbound_urls(response_text, allowed)
                 else:
                     has_links = bool(public_http_urls([response_text]))
+                # Capped history request: say honestly how much was readable.
+                # A silent outcome already returned above, so this never
+                # attaches to silence.
+                if context.clamped_from is not None:
+                    clamp_note = (
+                        f"(You asked for {context.clamped_from} messages; "
+                        f"I can read at most {self._cfg.max_context_messages}.)"
+                    )
+                    response_text = (
+                        f"{response_text}\n{clamp_note}" if response_text else clamp_note
+                    )
                 chunks = split_message(response_text, reply_cap) if response_text else ["(no response generated)"]
                 batch_id = uuid.uuid4().hex
 

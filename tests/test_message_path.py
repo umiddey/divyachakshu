@@ -8,8 +8,10 @@ from conftest import make_watcher as _watcher
 from conftest import process_messages as _process_messages
 
 from oi_agent.agent.reply import Reply
+from oi_agent.opencode.prompt import FINAL_OUTPUT_MARKER, OPEN_CHANNEL_SILENT
 from oi_agent.poster import DeliveryResult
 from oi_agent.watch import discord_client
+from oi_agent.watch.context_request import ContextRequest
 
 
 @pytest.fixture(autouse=True)
@@ -373,3 +375,75 @@ async def test_fresh_review_dispatch_after_reset_strip(tmp_path, monkeypatch):
     monkeypatch.setattr(discord_client.Poster, "deliver_chunk", fake_deliver)
     await _process_messages(watcher, channel, message)
     assert posted == ["review answer"]
+
+
+@pytest.mark.asyncio
+async def test_clamped_history_request_notice_appended_to_reply(tmp_path, monkeypatch):
+    """A request above max_context_messages is capped and the reply says so."""
+    watcher = _watcher(tmp_path)
+    channel = FakeChannel(111)
+    message = FakeMessage(
+        1, channel, FakeAuthor(7), "<@99> summarize the last 500 messages", [FakeMention(99)]
+    )
+    channel._history = [message]
+    posted = []
+
+    async def fake_infer(question):
+        """Ask for far more history than the clamp allows."""
+        return ContextRequest(count=500)
+
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
+        """Return a normal successful reply."""
+        return Reply("answer", "sha")
+
+    async def fake_deliver(self, **kwargs):
+        """Capture the posted chunk."""
+        posted.append(kwargs["chunk"])
+        return DeliveryResult(ok=True, discord_message_id=999)
+
+    monkeypatch.setattr(watcher._runner, "infer_context_request", fake_infer)
+    monkeypatch.setattr(watcher._runner, "run", fake_run)
+    monkeypatch.setattr(discord_client.Poster, "deliver_chunk", fake_deliver)
+    await watcher.on_message(message)
+    await asyncio.sleep(0.05)
+
+    assert posted == [
+        "answer\n(You asked for 500 messages; I can read at most 200.)"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_clamp_notice_never_added_on_silent_outcome(tmp_path, monkeypatch):
+    """A capped request on a silent open-channel outcome posts nothing at all."""
+    watcher = _watcher(tmp_path, open_channels=(111,), post_hourly_cap=20)
+    channel = FakeChannel(111)
+    message = FakeMessage(1, channel, FakeAuthor(7), "thanks all", [])
+    channel._history = [message]
+    posted = []
+
+    async def fake_infer(question):
+        """Exceed the clamp so a notice would exist if the reply were posted."""
+        return ContextRequest(count=500)
+
+    async def fake_run(*args, **kwargs):
+        """Declare model silence."""
+        return Reply(f"{FINAL_OUTPUT_MARKER}\n{OPEN_CHANNEL_SILENT}", "sha")
+
+    async def fake_deliver(self, **kwargs):
+        """Record any posting attempt; silence must never reach it."""
+        posted.append(kwargs.get("chunk"))
+        return DeliveryResult(ok=True, discord_message_id=999)
+
+    monkeypatch.setattr(watcher._runner, "infer_context_request", fake_infer)
+    monkeypatch.setattr(watcher._runner, "run", fake_run)
+    monkeypatch.setattr(discord_client.Poster, "deliver_chunk", fake_deliver)
+    await watcher.on_message(message)
+    await asyncio.sleep(0.05)
+
+    assert posted == []
+    assert watcher._store._conn.execute(
+        "SELECT status FROM mention_jobs WHERE source_message_id = 1"
+    ).fetchone() == ("done",)
+    assert watcher._store._conn.execute(
+        "SELECT COUNT(*) FROM delivery_batches"
+    ).fetchone()[0] == 0
