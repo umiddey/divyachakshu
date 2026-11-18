@@ -3,6 +3,8 @@
 import plistlib
 import stat
 import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +23,7 @@ from oi_agent.daemon import (
     stream_logs,
     uninstall,
 )
+from oi_agent.opencode.paths import resolve_opencode_paths
 from oi_agent.store import Store
 
 
@@ -460,3 +463,95 @@ def test_darwin_uninstall_boots_out_and_removes_plist(tmp_path, monkeypatch):
     uninstall(service_name="oi")
     assert not plist_path.exists()
     assert calls == [["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"]]
+
+
+def _fake_omp(tmp_path, payload, exit_code):
+    """Create a fake omp whose ``models --json`` prints payload and exits with exit_code."""
+    payload_file = tmp_path / "omp-models.json"
+    payload_file.write_text(payload, encoding="utf-8")
+    script = tmp_path / "fake-omp"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"sys.stdout.write(open({str(payload_file)!r}, encoding='utf-8').read())\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _omp_doctor(tmp_path, monkeypatch, payload, *, exit_code=0, summary="",
+                authenticated_ok=True, harness="omp"):
+    """Build a config with the OpenCode checks stubbed and omp pointed at a fake binary."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_file = tmp_path / "state" / "state.db"
+    state_file.parent.mkdir()
+    Store(state_file).close()
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    monkeypatch.setenv("OI_DISCORD_TOKEN", "token")
+    monkeypatch.setattr(
+        "oi_agent.daemon.check_version",
+        lambda *args: SimpleNamespace(binary="/bin/true", version=(1, 18, 25), raw="1.18.25"),
+    )
+    monkeypatch.setattr("oi_agent.daemon.authenticated", lambda *args: authenticated_ok)
+    monkeypatch.setattr(
+        "oi_agent.daemon.model_status",
+        lambda *args: SimpleNamespace(available=True, verified=True),
+    )
+    cfg = Config(
+        harness=harness,
+        omp_binary=str(_fake_omp(tmp_path, payload, exit_code)),
+        opencode_binary="/bin/true",
+        opencode_model="provider/model",
+        summary_model=summary,
+        db_path=str(state_file),
+    )
+    cfg.watches = [WatchTarget(1, str(repo))]
+    return cfg
+
+
+def test_omp_doctor_passes_when_configured_models_are_listed(tmp_path, monkeypatch):
+    """Both the chat and summary selectors listed by omp means no omp failure."""
+    payload = '{"models":[{"selector":"provider/model"},{"selector":"other/summary"}]}'
+    cfg = _omp_doctor(tmp_path, monkeypatch, payload, summary="other/summary")
+    assert doctor(cfg) == []
+
+
+def test_omp_doctor_names_login_for_unlisted_model(tmp_path, monkeypatch):
+    """A selector omp does not list names the exact omp login command."""
+    cfg = _omp_doctor(tmp_path, monkeypatch, '{"models":[]}')
+    home = resolve_opencode_paths(tmp_path / "operator", tool="omp").home
+    assert (
+        f"omp model unavailable: provider/model; run: HOME={home} omp login provider"
+        in doctor(cfg)
+    )
+
+
+def test_omp_doctor_checks_summary_model_too(tmp_path, monkeypatch):
+    """An unlisted summary_model is reported even when the chat model is listed."""
+    payload = '{"models":[{"selector":"provider/model"}]}'
+    cfg = _omp_doctor(tmp_path, monkeypatch, payload, summary="other/summary")
+    failures = doctor(cfg)
+    assert any(f.startswith("omp model unavailable: other/summary;") for f in failures)
+    assert not any(f.startswith("omp model unavailable: provider/model;") for f in failures)
+
+
+def test_omp_doctor_reports_unlistable_omp(tmp_path, monkeypatch):
+    """A nonzero omp exit fails closed with a failure instead of a silent pass."""
+    cfg = _omp_doctor(tmp_path, monkeypatch, '{"models":[]}', exit_code=1)
+    assert any("omp models could not be listed" in f for f in doctor(cfg))
+
+
+def test_omp_doctor_keeps_opencode_checks(tmp_path, monkeypatch):
+    """The OpenCode authentication check still runs when harness is omp."""
+    payload = '{"models":[{"selector":"provider/model"}]}'
+    cfg = _omp_doctor(tmp_path, monkeypatch, payload, authenticated_ok=False)
+    assert "no OpenCode provider is authenticated" in doctor(cfg)
+
+
+def test_opencode_harness_skips_omp_check(tmp_path, monkeypatch):
+    """With harness=opencode, omp's model list is never consulted (empty list still passes)."""
+    cfg = _omp_doctor(tmp_path, monkeypatch, '{"models":[]}', harness="opencode")
+    assert doctor(cfg) == []

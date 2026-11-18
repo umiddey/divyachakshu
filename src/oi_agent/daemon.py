@@ -18,6 +18,7 @@ from .opencode.bootstrap import (
     check_version,
     model_status,
 )
+from .opencode.omp import omp_model_selectors
 from .opencode.paths import resolve_opencode_paths
 from .store import Store
 
@@ -597,6 +598,29 @@ def uninstall(service_name: str = DEFAULT_SERVICE_NAME,
             raise DaemonError(f"could not remove service user {user!r}")
 
 
+def _omp_model_failures(cfg: Config, home: Path | None) -> list[str]:
+    """Return failures for configured models that omp cannot use (harness=omp).
+
+    The check reads ``omp models --json`` under the private omp environment,
+    so a missing selector means the omp login for that provider is absent.
+    """
+    if cfg.harness != "omp":
+        return []
+    paths = resolve_opencode_paths(home, tool="omp")
+    selectors = omp_model_selectors(cfg.omp_binary, paths)
+    if selectors is None:
+        return [f"omp models could not be listed from: {cfg.omp_binary}"]
+    failures = []
+    for model in dict.fromkeys([cfg.opencode_model, cfg.summary_model or cfg.opencode_model]):
+        if model not in selectors:
+            provider = model.partition("/")[0]
+            failures.append(
+                f"omp model unavailable: {model}; "
+                f"run: HOME={paths.home} omp login {provider}"
+            )
+    return failures
+
+
 def doctor(cfg: Config, *, user: str | None = None,
            warnings: list[str] | None = None) -> list[str]:
     """Run OpenCode, auth, model, repository, token, and state preflight checks.
@@ -636,6 +660,7 @@ def doctor(cfg: Config, *, user: str | None = None,
             )
     except OpenCodeBootstrapError as exc:
         failures.append(str(exc))
+    failures.extend(_omp_model_failures(cfg, identity.home if identity else None))
     for target in cfg.watches:
         repo = Path(target.repo_path).expanduser()
         if not repo.is_dir():

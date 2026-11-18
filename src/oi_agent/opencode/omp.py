@@ -8,8 +8,10 @@ extensions, skills, rules, or context files, so the model has no authority.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
 from typing import Any
 
 from ..config import _resolve_binary
@@ -29,6 +31,34 @@ def omp_argv(binary: str, model: str, system_prompt: str, max_time: int) -> list
         "--no-tools", "--no-session", "--no-extensions", "--no-skills",
         "--no-rules", "--no-context-files", "--no-title", "--no-lsp",
     ]
+
+
+def omp_model_selectors(binary: str, paths: OpenCodePaths) -> set[str] | None:
+    """Return the model selectors omp lists under the private environment.
+
+    ``omp models --json`` only lists models and makes no model call. Returns
+    None when the binary is missing, exits nonzero, or prints unparsable output.
+    """
+    resolved = _resolve_binary(binary)
+    if resolved is None:
+        return None
+    paths.ensure()
+    try:
+        proc = subprocess.run(
+            [resolved, "models", "--json"],
+            env=paths.environment(), cwd=str(paths.home),
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        data = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if proc.returncode != 0 or not isinstance(data, dict):
+        return None
+    models = data.get("models")
+    if not isinstance(models, list):
+        return None
+    return {item["selector"] for item in models
+            if isinstance(item, dict) and isinstance(item.get("selector"), str)}
 
 
 def _final_answer(events: list[dict[str, Any]]) -> str | None:
