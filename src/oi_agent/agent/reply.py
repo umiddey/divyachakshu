@@ -16,6 +16,7 @@ class Reply:
         error_class: Bounded machine-readable failure category.
         attachments: Absolute paths of .md/.txt docs written during the run
             for Discord file upload (docs-only mode, bounded, best-effort).
+        model: Model id that produced the answer, set on success only.
     """
 
     text: str
@@ -24,3 +25,4 @@ class Reply:
     error_class: str | None = None
     had_content: bool = False
     attachments: tuple[str, ...] = ()
+    model: str | None = None

@@ -12,7 +12,7 @@ from oi_agent.config import Config, WatchTarget
 from oi_agent.external.research import marker_retry_needed
 from oi_agent.opencode import runner as runner_module
 from oi_agent.opencode.native import NativeCompletion
-from oi_agent.opencode.prompt import FINAL_OUTPUT_MARKER
+from oi_agent.opencode.prompt import FINAL_OUTPUT_MARKER, OPEN_CHANNEL_SILENT
 from oi_agent.opencode.runner import OpenCodeRunner
 from oi_agent.store import Store
 
@@ -20,8 +20,8 @@ PRIMARY = "p/m1"
 FALLBACKS = ["p/m2", "p/m3"]
 
 
-def _success_events():
-    """A completed native answer whose text is ``hello``."""
+def _success_events(answer="hello"):
+    """A completed native answer whose text is ``answer``."""
     return [
         {
             "type": "text",
@@ -30,7 +30,7 @@ def _success_events():
                 "id": "p1",
                 "messageID": "m1",
                 "type": "text",
-                "text": f"{FINAL_OUTPUT_MARKER}\nhello",
+                "text": f"{FINAL_OUTPUT_MARKER}\n{answer}",
             },
         },
         {
@@ -46,8 +46,8 @@ def _success_events():
     ]
 
 
-def _success():
-    return (_success_events(), 0, "", 0, None, 5, NativeCompletion(True, None, "m1"))
+def _success(answer="hello"):
+    return (_success_events(answer), 0, "", 0, None, 5, NativeCompletion(True, None, "m1"))
 
 
 def _provider_error(status=429):
@@ -130,6 +130,7 @@ async def test_primary_answer_skips_fallbacks(tmp_path, monkeypatch):
     reply, calls = await _run(tmp_path, monkeypatch, _config(), [_success()])
     assert reply.ok
     assert reply.text == "hello"
+    assert reply.model == PRIMARY
     assert [c["model"] for c in calls] == [PRIMARY]
 
 
@@ -138,7 +139,8 @@ async def test_provider_error_moves_to_next_model(tmp_path, monkeypatch):
     """A 429 on the primary retries the next configured model, which answers."""
     reply, calls = await _run(tmp_path, monkeypatch, _config(), [_provider_error(429), _success()])
     assert reply.ok
-    assert reply.text == "hello"
+    assert reply.text == f"hello\n\nanswered by {FALLBACKS[0]}"
+    assert reply.model == FALLBACKS[0]
     assert [c["model"] for c in calls] == [PRIMARY, FALLBACKS[0]]
 
 
@@ -217,3 +219,30 @@ async def test_provider_exhaustion_is_not_a_marker_retry(tmp_path, monkeypatch):
         [_provider_error(429), _provider_error(429), _provider_error(429)],
     )
     assert not marker_retry_needed(error_class=reply.error_class, had_content=reply.had_content)
+
+
+@pytest.mark.asyncio
+async def test_footer_fits_within_max_reply_chars(tmp_path, monkeypatch):
+    """The footer counts against the reply cap, so a long fallback answer still fits."""
+    cfg = _config(max_reply_chars=200)
+    reply, _ = await _run(tmp_path, monkeypatch, cfg, [_provider_error(429), _success("x" * 500)])
+    assert len(reply.text) <= 200
+    assert reply.text.endswith(f"\n\nanswered by {FALLBACKS[0]}")
+
+
+@pytest.mark.asyncio
+async def test_silent_fallback_answer_has_no_footer(tmp_path, monkeypatch):
+    """A silent answer from a fallback stays silent: no footer is added."""
+    reply, _ = await _run(tmp_path, monkeypatch, _config(), [_provider_error(429), _success(OPEN_CHANNEL_SILENT)])
+    assert reply.ok
+    assert reply.text == OPEN_CHANNEL_SILENT
+    assert reply.model == FALLBACKS[0]
+
+
+@pytest.mark.asyncio
+async def test_total_failure_has_no_footer_or_model(tmp_path, monkeypatch):
+    """A chain that never answers carries no answering model and no footer."""
+    reply, _ = await _run(tmp_path, monkeypatch, _config(), [_provider_error(429)] * 3)
+    assert not reply.ok
+    assert reply.model is None
+    assert "answered by" not in reply.text

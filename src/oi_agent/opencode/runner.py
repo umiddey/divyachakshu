@@ -59,7 +59,7 @@ from .policy import (
     build_tool_free_agent,
     normalize_write_dirs,
 )
-from .prompt import FINAL_OUTPUT_MARKER, OPEN_CHANNEL_SILENT, build_prompt, render_evidence_block
+from .prompt import FINAL_OUTPUT_MARKER, OPEN_CHANNEL_SILENT, build_prompt, is_silent_reply, render_evidence_block
 from .provenance import audit_sha, git_pull, mutation_warning, staleness_note, worktree_fingerprint
 from .review_snapshots import ReviewSnapshot, ReviewSnapshotError, materialized_review
 from .review_target import (
@@ -1641,11 +1641,15 @@ class OpenCodeRunner:
                 write_dirs=write_dirs,
                 since_epoch=run_started,
             )
+        footer = ""
+        if model != self._cfg.opencode_model and not is_silent_reply(text):
+            footer = f"\n\nanswered by {model}"
         return Reply(
-            text=_bounded_text(text, self._cfg.max_reply_chars),
+            text=_bounded_text(text, self._cfg.max_reply_chars - len(footer)) + footer,
             sha=final_combined_sha,
             ok=True,
             attachments=attachments,
+            model=model,
         )
 
     async def _execute_agent(
