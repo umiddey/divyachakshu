@@ -1560,33 +1560,59 @@ class OpenCodeRunner:
         )
 
         run_started = time.time()
-        (
-            events, stderr_bytes, stderr_sample, returncode,
-            error_class, duration_ms, completion,
-        ) = (
-            await self._execute_agent(
-                binary=binary,
-                root=root,
-                additional_roots=additional_roots,
-                prompt_str=prompt_str,
-                prompt=prompt,
-                write_mode=write_mode,
-                write_dirs=write_dirs,
+        models = [self._cfg.opencode_model, *self._cfg.opencode_fallback_models]
+        # One wall budget for the whole chain. Attempt 0 keeps the configured
+        # per-attempt timeout (a total of 0 means the same value).
+        budget = (
+            self._cfg.opencode_fallback_total_timeout_seconds
+            or self._cfg.opencode_timeout_seconds
+        )
+        chain_started = time.monotonic()
+        for index, model in enumerate(models):
+            elapsed = time.monotonic() - chain_started if index else 0.0
+            remaining = budget - elapsed
+            if index and remaining < 1:
+                break
+            (
+                events, stderr_bytes, stderr_sample, returncode,
+                error_class, duration_ms, completion,
+            ) = (
+                await self._execute_agent(
+                    binary=binary,
+                    root=root,
+                    additional_roots=additional_roots,
+                    prompt_str=prompt_str,
+                    prompt=prompt,
+                    write_mode=write_mode,
+                    write_dirs=write_dirs,
+                    model=model,
+                    timeout_seconds=min(self._cfg.opencode_timeout_seconds, remaining),
+                )
             )
-        )
-        text, returned_session, event_error, text_parts = _select_final_text_v2(
-            events, completion
-        )
-        error_class = _merge_error_class(
-            error_class, event_error, completion
-        )
-        raw_text = text
-        if error_class is None:
-            text, marker_error = _extract_marked_answer(text)
-            error_class = marker_error
-        had_content = bool(raw_text.strip()) and error_class == "protocol_missing_final_marker"
-        if error_class is None and not text:
-            error_class = "empty_response"
+            text, returned_session, event_error, text_parts = _select_final_text_v2(
+                events, completion
+            )
+            error_class = _merge_error_class(
+                error_class, event_error, completion
+            )
+            raw_text = text
+            if error_class is None:
+                text, marker_error = _extract_marked_answer(text)
+                error_class = marker_error
+            had_content = bool(raw_text.strip()) and error_class == "protocol_missing_final_marker"
+            if error_class is None and not text:
+                error_class = "empty_response"
+            logger.info(
+                "[opencode] events=%d text_parts=%d stderr_bytes=%d duration_ms=%d "
+                "exit=%s model=%s session=%s error=%s",
+                len(events), text_parts, stderr_bytes, duration_ms,
+                returncode if returncode is not None else "none",
+                model,
+                (returned_session or "")[:8] or "none",
+                error_class or "none",
+            )
+            if error_class is None or _retry_class(error_class, events) not in RETRYABLE_CLASSES:
+                break
 
         final_sha_list = []
         for st in repo_states:
@@ -1602,15 +1628,6 @@ class OpenCodeRunner:
 
         final_combined_sha = ", ".join(final_sha_list)
 
-        logger.info(
-            "[opencode] events=%d text_parts=%d stderr_bytes=%d duration_ms=%d "
-            "exit=%s model=%s session=%s error=%s",
-            len(events), text_parts, stderr_bytes, duration_ms,
-            returncode if returncode is not None else "none",
-            self._cfg.opencode_model,
-            (returned_session or "")[:8] or "none",
-            error_class or "none",
-        )
         if error_class:
             _log_failure_detail("opencode", error_class, stderr_sample, events)
             return _failure(
@@ -1644,6 +1661,8 @@ class OpenCodeRunner:
         files: list[Path] | None = None,
         disposable: DisposableNativeRoot | None = None,
         controller_snapshots: bool = False,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[
         list[dict[str, Any]], int, str, int | None, str | None, int, NativeCompletion
     ]:
@@ -1673,14 +1692,20 @@ class OpenCodeRunner:
             controller_snapshots: True only for review runs, whose roots are
                 controller-materialized verified-SHA snapshots (see
                 :func:`build_permission_policy`).
+            model: Model override; empty runs ``opencode_model``.
+            timeout_seconds: Per-attempt timeout; None uses ``opencode_timeout_seconds``.
 
         Returns:
             ``(events, stderr_bytes, stderr_sample, returncode, error_class,
             duration_ms)``. ``error_class`` covers spawn, timeout, protocol,
             and exit failures; final-text selection stays with the caller.
         """
+        requested_model = model or self._cfg.opencode_model
+        timeout = (
+            self._cfg.opencode_timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
         agent_document = build_agent_config(
-            self._cfg.opencode_model,
+            requested_model,
             self._cfg.opencode_steps,
             root,
             prompt_str,
@@ -1691,7 +1716,7 @@ class OpenCodeRunner:
         )
         argv = [
             binary,
-            *build_argv(self._cfg.opencode_model, "oi", files=files),
+            *build_argv(requested_model, "oi", files=files),
         ]
         if disposable is not None:
             environment = disposable.environment()
@@ -1729,7 +1754,7 @@ class OpenCodeRunner:
             stderr_task = asyncio.create_task(_consume_stderr(process.stderr))
             await asyncio.wait_for(
                 asyncio.gather(process.wait(), stdout_task, stderr_task),
-                timeout=self._cfg.opencode_timeout_seconds,
+                timeout=timeout,
             )
             events, _ = stdout_task.result()
             stderr_bytes, stderr_sample = stderr_task.result()
