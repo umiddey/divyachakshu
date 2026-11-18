@@ -22,6 +22,10 @@ DEFAULT_VOICE = (
 
 FINAL_OUTPUT_MARKER = "[[OI_FINAL_ANSWER]]"
 
+# Open-channel silence contract (P6): the only text a run may leave after the
+# final marker to say "post nothing" without failing the protocol.
+OPEN_CHANNEL_SILENT = "[[OI_SILENT]]"
+
 # --- Rendering bounds (plan Phase 3.5; findings B3/B5/B6) -------------------------
 # Total byte budget for the compact-JSON untrusted memory block. Truncation
 # happens at whole-field/item boundaries; the JSON emitted is always parseable.
@@ -210,6 +214,7 @@ def build_prompt(
     write_mode: str = "read-only",
     write_dirs: list[str] | tuple[str, ...] | None = None,
     external_inputs: bool = False,
+    open_channel: bool = False,
 ) -> str:
     """Build the complete OI prompt with immutable safety instructions last.
 
@@ -229,6 +234,10 @@ def build_prompt(
             evidence. Renders the untrusted-evidence contract so the agent
             describes that evidence truthfully instead of claiming it has no
             internet access or pretending to have browsed.
+        open_channel: True when the run serves an open channel whose every
+            message is visible. Renders the OPEN CHANNEL reply-or-stay-silent
+            contract and the ``[[OI_SILENT]]`` token rule; never used for
+            review runs.
 
     Returns:
         Prompt for the native OpenCode ``oi`` agent.
@@ -344,6 +353,24 @@ BEHAVIORAL MEMORY USAGE RULES:
             "`oi config set write_mode docs-only`)."
         )
     evidence_contract = EXTERNAL_EVIDENCE_CONTRACT if external_inputs else ""
+    open_channel_contract = (
+        f"""
+OPEN CHANNEL MODE:
+This run serves an open channel: THREAD CONTEXT contains every channel
+message, including messages addressed to other members and messages written
+by other bots or agents.
+- Reply only when you are asked directly, explicitly addressed, or you can
+  add something concrete and material (a fact, a fix, a decision, a
+  correction). Silence is the correct default.
+- NEVER reply just to acknowledge, agree, thank, greet, or restate what
+  someone already said.
+- Stay silent when another agent already answered adequately, or when a
+  bot-to-bot exchange is no longer progressing the conversation.
+- To stay silent, make the text after the {FINAL_OUTPUT_MARKER} marker
+  exactly this token and nothing else: {OPEN_CHANNEL_SILENT}
+  The controller then posts nothing; anything else is posted as your reply.
+"""
+    ) if open_channel else ""
     return f"""You are OI, an engineering co-founder and repository auditor answering a team conversation.
 
 {identity_section}
@@ -379,8 +406,7 @@ EVIDENCE AND GUIDANCE CONTRACT:
 - When local verification is unavailable, say so plainly and identify what the user must verify in their environment.
 - Do not claim to have changed files, run commands, contacted Discord, or used tools
   that were not actually available and exercised.
-{evidence_contract}
-
+{evidence_contract}{open_channel_contract}
 RESPONSE CONTRACT:
 - Address the author and latest question directly with human cadence.
 - Be concise enough for Discord while preserving concrete paths and symbols.
@@ -405,6 +431,23 @@ RESPONSE CONTRACT:
   followed by the user-facing answer. This marker is mandatory even when
   the answer is a limitation or refusal.
 """
+
+
+def is_silent_reply(text: str) -> bool:
+    """Return True when a reply is exactly the open-channel silence token.
+
+    Only the text after the last ``[[OI_FINAL_ANSWER]]`` marker counts,
+    mirroring the runner's marker extraction, so narration before the marker
+    never turns a silence into a reply. The token must be the entire
+    remaining content, whitespace tolerant; a token inside a sentence is an
+    ordinary answer, never silence. Text without any marker is checked as a
+    whole, because the open-channel handler sees already-extracted answers.
+    """
+    if not isinstance(text, str):
+        return False
+    if FINAL_OUTPUT_MARKER in text:
+        return text.rsplit(FINAL_OUTPUT_MARKER, 1)[1].strip() == OPEN_CHANNEL_SILENT
+    return text.strip() == OPEN_CHANNEL_SILENT
 
 
 # --- Controller-provided external evidence -------------------------------------

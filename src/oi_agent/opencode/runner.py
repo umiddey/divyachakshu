@@ -803,6 +803,7 @@ class OpenCodeRunner:
         member_id: str | None = None,
         bot_name: str = "",
         bot_id: int | None = None,
+        open_channel: bool = False,
     ) -> Reply:
         """Refresh, snapshot, execute, and provenance-stamp one or more repository audits.
 
@@ -820,6 +821,9 @@ class OpenCodeRunner:
             bot_name: Discord display name the agent posts under; grounds the
                 prompt identity block.
             bot_id: Stable Discord user id of the agent's bot account.
+            open_channel: True for open-channel runs; renders the
+                reply-or-stay-silent contract in the prompt. Never applied to
+                review runs.
 
         Returns:
             Bounded Reply. OpenCode/process failures have ``ok=False``.
@@ -868,6 +872,7 @@ class OpenCodeRunner:
                 evidence=evidence,
                 code_question=code_question,
                 format_reminder=reminder,
+                open_channel=open_channel,
             )
     async def run_raw_prompt(
         self,
@@ -1197,6 +1202,7 @@ class OpenCodeRunner:
         excerpt: str,
         bot_name: str = "",
         bot_id: int | None = None,
+        open_channel: bool = False,
     ) -> Reply:
         """Answer an external-evidence question in a disposable read-only run.
 
@@ -1229,6 +1235,9 @@ class OpenCodeRunner:
             excerpt: Bounded Discord conversation excerpt.
             bot_name: Discord display name the agent posts under.
             bot_id: Stable Discord user id of the bot account.
+            open_channel: True for open-channel runs; renders the
+                reply-or-stay-silent contract in the prompt. Never applied to
+                review runs.
 
         Returns:
             A bounded Reply. External runs never carry a resumable session.
@@ -1296,6 +1305,7 @@ class OpenCodeRunner:
             write_mode="read-only",
             write_dirs=[],
             external_inputs=True,
+            open_channel=open_channel,
         )
 
         disposable = DisposableNativeRoot()
@@ -1367,6 +1377,7 @@ class OpenCodeRunner:
         evidence: PreparedExternal | None = None,
         code_question: bool = True,
         format_reminder: str | None = None,
+        open_channel: bool = False,
     ) -> Reply:
         """Execute one audit while holding repository serialization locks."""
         all_roots = [root, *additional_roots]
@@ -1457,6 +1468,7 @@ class OpenCodeRunner:
             write_mode=write_mode,
             write_dirs=write_dirs,
             external_inputs=evidence is not None and evidence.inputs.has_external_content,
+            open_channel=open_channel,
         )
 
         run_started = time.time()

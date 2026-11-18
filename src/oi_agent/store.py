@@ -1695,6 +1695,38 @@ class Store:
             self._conn.execute("ROLLBACK")
             raise
 
+    def complete_jobs_silent(self, source_message_ids: list[int]) -> None:
+        """Mark mention jobs done after a silent open-channel run, with no delivery.
+
+        A silent outcome never produces an outbox batch, so this cannot reuse
+        ``complete_delivery_batch`` (it needs a batch id) or ``fail_jobs``
+        (it reschedules or dead-letters instead of finishing work). The jobs
+        end ``done`` and no delivery_batches or outbound_chunks rows exist.
+
+        Args:
+            source_message_ids (list[int]): Source message IDs to finish silently.
+
+        Returns:
+            None: No return value.
+        """
+        if not source_message_ids:
+            return
+        now = int(time.time())
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            # source_message_id is the primary key; batch sizes are one debounced
+            # burst, so per-key parameterized updates need no dynamic IN clause.
+            for msg_id in source_message_ids:
+                self._conn.execute(
+                    "UPDATE mention_jobs SET status = 'done', lease_until = 0, updated_at = ? "
+                    "WHERE source_message_id = ?",
+                    (now, int(msg_id)),
+                )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
     def fail_jobs(self, source_message_ids: list[int], error_class: str,
                   is_permanent: bool, retry_delay_seconds: int = 10,
                   max_attempts: int = 5) -> None:
