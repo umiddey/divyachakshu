@@ -27,7 +27,7 @@ async def test_direct_mention_reaches_runner_and_poster_once(tmp_path, monkeypat
     channel._history = [message]
     calls = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Return a deterministic successful OpenCode reply."""
         calls.append((author, question))
         return Reply("answer", "abc123")
@@ -86,7 +86,7 @@ async def test_trigger_during_run_gets_one_followup(tmp_path, monkeypatch):
     release = asyncio.Event()
     questions = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Hold the first run open while the second trigger arrives."""
         questions.append(question)
         if question == "@ultron (user id 99) first":
@@ -127,7 +127,7 @@ async def test_protocol_failure_is_retried_once(tmp_path, monkeypatch, failure_c
     channel._history = [message]
     runs = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Fail once, then succeed fresh."""
         runs.append(failure_class)
         if len(runs) == 1:
@@ -172,7 +172,7 @@ async def test_question_and_excerpt_reach_runner_with_resolved_mentions(tmp_path
     channel._history = [older, latest]
     captured = {}
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         captured["question"] = question
         captured["excerpt"] = excerpt
         return Reply("answer", "sha")
@@ -200,7 +200,7 @@ async def test_runner_receives_bot_identity(tmp_path, monkeypatch):
     channel._history = [message]
     captured = {}
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         captured["bot_name"] = bot_name
         captured["bot_id"] = bot_id
         return Reply("answer", "sha")
@@ -229,7 +229,7 @@ async def test_fresh_command_is_stripped_before_run(tmp_path, monkeypatch, conte
     channel._history = [first]
     questions, posted = [], []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Capture clean prompt context."""
         questions.append(question)
         assert "!fresh" not in question + excerpt
@@ -263,7 +263,7 @@ async def test_noncommand_text_is_not_treated_as_reset(tmp_path, monkeypatch, co
     channel._history = [message]
     questions = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Preserve literal user text when it is not a leading command token."""
         questions.append(question)
         assert "!" in question
@@ -290,7 +290,7 @@ async def test_earlier_burst_reset_token_is_stripped(tmp_path, monkeypatch):
     channel._history = [first, second]
     captured = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Capture the coalesced run with sanitized context."""
         captured.append((question, excerpt))
         assert "!new" not in excerpt

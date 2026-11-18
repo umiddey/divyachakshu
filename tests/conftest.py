@@ -81,10 +81,20 @@ class FakeMessage:
         self.embeds = []
 
 
-def make_watcher(tmp_path, channel_id=111):
-    """Build a watcher with one configured target and isolated state."""
+def make_watcher(tmp_path, channel_id=111, open_channels=(), post_hourly_cap=None):
+    """Build a watcher with one configured target and isolated state.
+
+    Keyword-only extras: ``open_channels`` marks the target channel open and
+    ``post_hourly_cap`` raises the default cap of 3, which would defer the
+    extra replies open-channel test cases post.
+    """
     cfg = Config()
-    cfg.watches = [WatchTarget(channel_id, str(tmp_path / "repo"), 99, 3)]
+    target = WatchTarget(channel_id, str(tmp_path / "repo"), 99, 3)
+    if open_channels:
+        target.open_channels = list(open_channels)
+    if post_hourly_cap is not None:
+        target.post_hourly_cap = post_hourly_cap
+    cfg.watches = [target]
     return OIWatcher(cfg, Store(tmp_path / "state.db"))
 
 

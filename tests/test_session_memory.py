@@ -61,7 +61,7 @@ async def test_prompt_places_summary_before_newest_context_messages(tmp_path, mo
     channel._history = newest_first
     captured = {}
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Capture the assembled prompt context."""
         captured["excerpt"] = excerpt
         return Reply("answer", "sha")
@@ -101,7 +101,7 @@ async def test_fresh_resets_stored_summary(tmp_path, monkeypatch):
     channel._history = [message]
     captured = {}
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Capture the post-reset prompt context."""
         captured["excerpt"] = excerpt
         return Reply("answer", "sha")
@@ -181,7 +181,7 @@ async def test_unparsable_summary_is_skipped_and_reply_still_posts(tmp_path, mon
     channel._history = [message]
     captured = {}
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         """Capture the prompt context."""
         captured["excerpt"] = excerpt
         return Reply("answer", "sha")

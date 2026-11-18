@@ -47,6 +47,7 @@ from ..external.research import (
 )
 from ..opencode.bootstrap import resolve_runtime_binary
 from ..opencode.paths import resolve_opencode_paths
+from ..opencode.prompt import is_silent_reply
 from ..opencode.runner import OpenCodeRunner, scope_id_for_target
 from ..opencode.storage import prune_private_npm
 from ..poster import Poster, split_message
@@ -68,7 +69,7 @@ from .attachments import (
     unloaded_history_attachment_note,
 )
 from .context_request import ContextRequestMemory, bounded_window
-from .gate import Action, MentionedUser, evaluate
+from .gate import Action, GateDecision, MentionedUser, evaluate
 
 logger = logging.getLogger(__name__)
 # Per-line render cap for history evidence lines: Discord's own hard maximum
@@ -77,6 +78,11 @@ logger = logging.getLogger(__name__)
 # both lengths, never silently truncated.
 HISTORY_LINE_MAX_CHARS = 4000
 BURST_QUIET_SECONDS = 8.0
+# Open channels admit plain conversation, including other bots' traffic. A run
+# of consecutive bot turns is capped so two chatty agents cannot loop forever;
+# any human message resets the count.
+OPEN_CHANNEL_MAX_BOT_TURNS = 4
+
 # Upper bound on the names the addressee gate inspects for other members.
 _GATE_OTHER_NAMES_LIMIT = 32
 MAX_CONCURRENT_AUDITS_PER_CHANNEL = 2
@@ -519,6 +525,11 @@ class OIWatcher(discord.Client):
         self._reflection_engine = ReflectionEngine(self._runner, store)
         self._channel_sems: dict[int, asyncio.Semaphore] = {}
         self._conversation_last_event: dict[int, float] = {}
+        # Open-channel loop guards, keyed by owner channel id, process-local:
+        # consecutive bot turns admitted, and start times of this hour's runs.
+        # A restart only relaxes them; nothing about channel text is kept.
+        self._open_bot_streak: dict[int, int] = {}
+        self._open_run_log: dict[int, list[float]] = {}
         self._channel_cache: dict[int, discord.abc.Messageable] = {}
         self._worker_task: asyncio.Task | None = None
         self._reminder_task: asyncio.Task | None = None
@@ -547,6 +558,62 @@ class OIWatcher(discord.Client):
             sem = asyncio.Semaphore(MAX_CONCURRENT_AUDITS_PER_CHANNEL)
             self._channel_sems[channel_id] = sem
         return sem
+
+    def _open_runs_in_last_hour(self, owner_channel_id: int) -> int:
+        """Prune and count this hour's open-channel run starts for one owner.
+
+        Args:
+            owner_channel_id (int): Owner channel snowflake id.
+
+        Returns:
+            int: Run starts (reply runs and summary runs) in the trailing hour.
+        """
+        now = time.time()
+        runs = [t for t in self._open_run_log.get(owner_channel_id, ()) if now - t < 3600]
+        self._open_run_log[owner_channel_id] = runs
+        return len(runs)
+
+    def _record_open_run(self, owner_channel_id: int) -> None:
+        """Record one open-channel run start against the hourly run cap.
+
+        Args:
+            owner_channel_id (int): Owner channel snowflake id.
+
+        Returns:
+            None: No return value.
+        """
+        self._open_run_log.setdefault(owner_channel_id, []).append(time.time())
+
+    def _admit_open_mode(self, target: WatchTarget, owner: int, message: Any) -> bool:
+        """Track the consecutive-bot-turn streak and return the open-mode verdict.
+
+        Open channels admit every human message; OI never answers itself (the
+        author is this bot's account or the watch's ``bot_user_id``), and a
+        bot turn is admitted only while the consecutive-bot-turn streak stays
+        within ``OPEN_CHANNEL_MAX_BOT_TURNS``. Any human message resets the
+        streak. The explicit-trigger gate is not consulted: open mode reads
+        plain conversation by design.
+
+        Args:
+            target (WatchTarget): Resolved watch target for the channel.
+            owner (int): Owner channel id the streak is tracked under.
+            message (Any): Incoming Discord message event.
+
+        Returns:
+            bool: True when this message may be admitted to the pipeline.
+        """
+        author_id = int(getattr(message.author, "id", 0) or 0)
+        own_author = bool(author_id) and author_id in (
+            target.bot_user_id, self.user.id if self.user else 0
+        )
+        author_is_bot = own_author or bool(getattr(message.author, "bot", False))
+        streak = self._open_bot_streak.get(owner, 0)
+        self._open_bot_streak[owner] = streak + 1 if author_is_bot else 0
+        if own_author:
+            return False
+        if author_is_bot:
+            return streak + 1 <= OPEN_CHANNEL_MAX_BOT_TURNS
+        return True
 
     def _repo_lock(self, repo_path: str | Path) -> asyncio.Lock:
         """Return (creating on first use) the per-repo execution lock.
@@ -1100,6 +1167,35 @@ class OIWatcher(discord.Client):
                 names.append(name)
         return list(dict.fromkeys(names))[:_GATE_OTHER_NAMES_LIMIT]
 
+    def _gate_decision(self, message: Any, channel: Any, bot_user_id: int) -> GateDecision:
+        """Run the admission gate on one message.
+
+        Shared by ``on_message`` and the durable worker so the open-channel
+        "was this trigger explicitly addressed?" question re-derives exactly
+        the decision the admission path used.
+
+        Args:
+            message (Any): Discord message (or fake) to evaluate.
+            channel (Any): Channel the message was posted in.
+            bot_user_id (int): This bot's user id for the gate.
+
+        Returns:
+            GateDecision: The gate's RESPOND/IGNORE verdict.
+        """
+        resolved = getattr(getattr(message, "reference", None), "resolved", None)
+        loaded_recent = (
+            (message, resolved) if isinstance(resolved, discord.Message) else (message,)
+        )
+        return evaluate(
+            content=message.content or "",
+            mention_ids=[m.id for m in getattr(message, "mentions", [])],
+            bot_user_id=bot_user_id,
+            bot_names=self._gate_own_names(channel),
+            mentioned_users=self._gate_mentioned_users(message),
+            reply_to_user_id=self._gate_reply_author_id(message),
+            other_names=self._gate_other_names(channel, bot_user_id, loaded_recent),
+        )
+
     async def _apply_research(
         self,
         prepared: PreparedExternal,
@@ -1472,22 +1568,8 @@ class OIWatcher(discord.Client):
 
 
         bot_user_id = target.bot_user_id or (self.user.id if self.user else 0)
-        mention_ids = [m.id for m in getattr(message, "mentions", [])]
-        resolved = getattr(getattr(message, "reference", None), "resolved", None)
-        loaded_recent = (
-            (message, resolved) if isinstance(resolved, discord.Message) else (message,)
-        )
-        decision = evaluate(
-            content=message.content or "",
-            mention_ids=mention_ids,
-            bot_user_id=bot_user_id,
-            bot_names=self._gate_own_names(message.channel),
-            mentioned_users=self._gate_mentioned_users(message),
-            reply_to_user_id=self._gate_reply_author_id(message),
-            other_names=self._gate_other_names(
-                message.channel, bot_user_id, loaded_recent
-            ),
-        )
+        open_mode = owner in target.open_channels
+        decision = self._gate_decision(message, message.channel, bot_user_id)
         logger.info(
             "[watcher] %s %s in %s",
             decision.action.value,
@@ -1496,7 +1578,12 @@ class OIWatcher(discord.Client):
         )
         self._store.update_scope_cursor(str(message.channel.id), owner, message.id)
 
-        if decision.action == Action.RESPOND:
+        # Open mode overrides the gate verdict entirely (see _admit_open_mode).
+        admitted = decision.action == Action.RESPOND
+        if open_mode:
+            admitted = self._admit_open_mode(target, owner, message)
+
+        if admitted:
             self._conversation_last_event[message.channel.id] = time.time()
             if self._store.admit_mention_job(
                 source_message_id=message.id,
@@ -1507,7 +1594,7 @@ class OIWatcher(discord.Client):
                 if self._worker_task is None or self._worker_task.done():
                     self._worker_task = asyncio.create_task(self._durable_worker_loop())
                 self._work_event.set()
-        elif decision.action == Action.IGNORE:
+        else:
             # Chatter during burst extends quiet period
             self._conversation_last_event[message.channel.id] = time.time()
             self._work_event.set()
@@ -1710,6 +1797,21 @@ class OIWatcher(discord.Client):
                 )
                 return
 
+            # Open-channel cost cap: runs (reply runs and summary runs) per
+            # owner channel per hour, tracked in memory.
+            open_channel = owner_channel_id in target.open_channels
+            if (
+                open_channel
+                and self._open_runs_in_last_hour(owner_channel_id)
+                >= self._cfg.open_channel_runs_per_hour
+            ):
+                self._store.defer_jobs(
+                    source_message_ids,
+                    error_class="open_run_cap",
+                    delay_seconds=60,
+                )
+                return
+
             # 4. Fetch source triggering message
             trigger_message = None
             if hasattr(ch, "fetch_message"):
@@ -1734,6 +1836,15 @@ class OIWatcher(discord.Client):
             author_name = getattr(trigger_message.author, "display_name", "unknown")
             author_id = getattr(trigger_message.author, "id", 0)
             command_bot_id = target.bot_user_id or (self.user.id if self.user else 0)
+            # Open-channel failure rule: a failed run may post only when this
+            # trigger explicitly addressed OI, so re-derive it with the same
+            # gate the admission path used.
+            addressed = True
+            if open_channel:
+                addressed = (
+                    self._gate_decision(trigger_message, ch, command_bot_id).action
+                    == Action.RESPOND
+                )
             prompt_content, fresh_requested = _strip_fresh_command(
                 trigger_message.content or "", command_bot_id
             )
@@ -1781,6 +1892,9 @@ class OIWatcher(discord.Client):
                     getattr(identity_source, "display_name", "")
                     or getattr(identity_source, "name", "")
                 )
+            # One debounced burst is one run; count it for the open-channel cap.
+            if open_channel:
+                self._record_open_run(owner_channel_id)
             sem = self._channel_semaphore(owner_channel_id)
 
             async with sem:
@@ -1860,6 +1974,7 @@ class OIWatcher(discord.Client):
                                 excerpt=excerpt,
                                 bot_name=bot_name,
                                 bot_id=bot_id,
+                                open_channel=open_channel,
                             )
                         else:
                             reply = await self._runner.run(
@@ -1870,6 +1985,7 @@ class OIWatcher(discord.Client):
                                 member_id=participant_id,
                                 bot_name=bot_name,
                                 bot_id=bot_id,
+                                open_channel=open_channel,
                             )
                             if not reply.ok and reply.error_class in {
                                 "protocol_missing_final_marker",
@@ -1891,6 +2007,7 @@ class OIWatcher(discord.Client):
                                     member_id=participant_id,
                                     bot_name=bot_name,
                                     bot_id=bot_id,
+                                    open_channel=open_channel,
                                 )
                     finally:
                         # Guaranteed cleanup on success, failure, rejection,
@@ -1915,6 +2032,14 @@ class OIWatcher(discord.Client):
                     except asyncio.CancelledError:
                         pass
 
+                # Open-channel outcomes never post noise: a declared silence
+                # finishes with no delivery at all, and a failed run posts
+                # only when the trigger explicitly addressed OI.
+                if open_channel and (
+                    is_silent_reply(reply.text) or (not reply.ok and not addressed)
+                ):
+                    self._store.complete_jobs_silent(source_message_ids)
+                    return
                 reply_cap = self._cfg.max_reply_chars if self._cfg else 2000
                 response_text = reply.text
                 if researched:

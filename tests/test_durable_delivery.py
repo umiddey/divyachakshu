@@ -278,7 +278,7 @@ async def test_downtime_message_recovery_on_on_ready(tmp_path: Path, monkeypatch
 
     deliveries = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         return Reply("recovered reply", "sha123")
 
     async def fake_deliver(self, channel_id, target_channel_id, chunk, nonce, reply_to_message_id=None, client=None):
@@ -321,7 +321,7 @@ async def test_active_and_archived_thread_recovery(tmp_path: Path, monkeypatch) 
     watcher._test_guilds = [guild]
     runs = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         runs.append(question)
         return Reply(f"ans for {question}", "sha")
 
@@ -353,7 +353,7 @@ async def test_burst_coalescing_preserves_all_source_message_ids(tmp_path: Path,
 
     questions_seen = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         questions_seen.append(question)
         return Reply("combined answer", "sha123")
 
@@ -460,7 +460,7 @@ async def test_lease_expiry_recovery_after_simulated_crash(tmp_path: Path, monke
 
     runs = []
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         runs.append(question)
         return Reply("recovered from crash", "sha999")
 
@@ -631,7 +631,7 @@ async def test_concurrent_conversations_burst_parallelism(
     started = []
     release = asyncio.Event()
 
-    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None, open_channel=False):
         started.append(question)
         if len(started) == 2:
             release.set()
