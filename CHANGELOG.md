@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-18
 
-**Breaking:** the next release is 0.2.0, not 0.1.2, because the session keys
+**Breaking:** this release is 0.2.0, not 0.1.2, because the session keys
 `max_session_turns` and `session_ttl_days` are removed. Old config files
 still load: the loader accepts and drops the two keys and never writes them
 back.
