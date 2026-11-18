@@ -8,6 +8,7 @@
   OpenCode. The default stays `opencode`.
 - `oi doctor` with `harness = "omp"` checks that omp lists the configured chat
   and summary models and names the `omp login` command when one is missing.
+- **Breaking:** open channels no longer get the full OI system prompt. They get minimal plumbing (Discord identity, repository list, untrusted-data rule, no-credentials rule, reply marker, silence token). The global `open_channel_prompt` (default `none`, or `personality`) sets the mode; `open_channel_prompts` and `oi config open-channel-prompt <id> none|personality|inherit` override one channel. Open-channel runs are read-only and do not read memory. Non-open-channel prompts are unchanged.
 
 ## 0.2.0 - 2026-11-18
 

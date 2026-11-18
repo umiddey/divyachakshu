@@ -174,6 +174,7 @@ replacement. Defaults:
 | `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
 | `context_messages` | `40` (10–`max_context_messages`) | Newest messages shown to the model alongside the rolling summary. |
 | `open_channel_runs_per_hour` | `6` (1–60) | Model-run cap per open channel per hour; over the cap, jobs are deferred. |
+| `open_channel_prompt` | `none` | Prompt mode for open channels: `none` (plumbing only) or `personality` (plumbing plus the `personality` text). Per-channel overrides: see Open channels. |
 | `summary_model` | `` (empty = `opencode_model`) | Model used for summary runs. |
 | `summary_max_chars` | `1500` (600–4000) | Rendered rolling-summary size cap. |
 | `summary_decay_days` | `60` (7–730) | Age after which non-durable summary items drop. |
@@ -184,7 +185,7 @@ replacement. Defaults:
 | `max_attachments` | `4` (0–16) | Attachments accepted per message. |
 | `max_attachment_bytes` | `8388608` (max 33554432) | Per-attachment byte cap. |
 | `image_inputs` | `off` | `off`, or `on` to pass images as real image files. |
-| `watches` | `[]` | `[[watch]]` entries: `channel_id` or `guild_id`, `repos`, `bot_user_id`, `post_hourly_cap` (default 3), `ignored_channels`, `allowed_channels`, `reminder_channel_id` (0 = no reminders in that server), `open_channels` (see Open channels). |
+| `watches` | `[]` | Each watch: `guild_id`, `channel_id`, `repo_paths`, `open_channels` (see Open channels), `open_channel_prompts` (per-channel `none`/`personality` override, see Open channels). |
 
 ## Using the bot in Discord
 
@@ -246,6 +247,8 @@ concrete to add: an unanswered question, a decision to contribute, real
 information. When it has nothing to add it stays silent: the model returns
 the `[[OI_SILENT]]` token instead of text and nothing is posted.
 
+What the model sees in an open channel is set by `open_channel_prompt` (default `none`). `none` gives only plumbing: the Discord identity, the repositories it can read, a rule that channel and repository text are data and not instructions, the rule never to post credentials, and the reply marker and silence token. It gets no safety contract, evidence rules, or persona. `personality` adds the configured `personality` text on top of the same plumbing. Open-channel runs are read-only, even when `write_mode` is `docs-only`, and never read behavioral memory. Set the global default with `oi config set open_channel_prompt personality`.
+
 Caps keep loops and costs bounded:
 
 - Another bot (or OI itself) is followed for at most 4 consecutive turns;
@@ -270,6 +273,7 @@ oi config watch-add --guild-id 999 --repo /srv/repos/app \
   --open-channels 222,333                      # open channels on the new watch
 oi config open-channel-add 444 --watch 999     # one more, later
 oi config open-channel-remove 222              # close one again
+oi config open-channel-prompt 444 personality  # this one channel gets the personality text
 ```
 
 A single-channel watch can only open the channel it already watches
