@@ -457,6 +457,7 @@ const SETTINGS_FIELDS = [
   ["reply_delivery", "select:chunked,single_message"], ["opencode_binary", "text"],
   ["opencode_model", "text"], ["opencode_steps", "number"],
   ["opencode_timeout_seconds", "number"], ["write_mode", "select:read-only,docs-only"],
+  ["opencode_fallback_models", "list"], ["opencode_fallback_total_timeout_seconds", "number"],
   ["max_context_messages", "number"], ["max_context_age_days", "number"],
   ["context_messages", "number"], ["open_channel_runs_per_hour", "number"],
   ["open_channel_prompt", "select:none,personality"],
@@ -489,9 +490,10 @@ async function loadSettings() {
       } else {
         input = document.createElement("input");
         input.type = kind === "number" ? "number" : "text";
-        input.value = kind === "number" ? Number(cfg[key]) : String(cfg[key]);
+        input.value = kind === "number" ? Number(cfg[key]) : kind === "list" ? cfg[key].join(", ") : String(cfg[key]);
       }
       input.dataset.field = key;
+      if (kind === "list") input.dataset.list = "true";
       l.append(input);
       form.append(l);
     }
@@ -528,7 +530,11 @@ function renderDashWatches(watches) {
 function collectSettings(watches) {
   const cfg = {};
   document.querySelectorAll("#settings-form [data-field]").forEach((input) => {
-    cfg[input.dataset.field] = input.type === "number" ? Number(input.value) : input.value;
+    if (input.dataset.list) {
+      cfg[input.dataset.field] = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+    } else {
+      cfg[input.dataset.field] = input.type === "number" ? Number(input.value) : input.value;
+    }
   });
   cfg.write_dirs = Array.isArray(state.dashWriteDirs) ? state.dashWriteDirs : cfg.write_dirs || [];
   cfg.watches = watches;

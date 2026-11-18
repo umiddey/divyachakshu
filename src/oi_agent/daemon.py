@@ -16,6 +16,7 @@ from .opencode.bootstrap import (
     OpenCodeBootstrapError,
     authenticated,
     check_version,
+    list_models,
     model_status,
 )
 from .opencode.omp import omp_model_selectors
@@ -650,7 +651,8 @@ def doctor(cfg: Config, *, user: str | None = None,
         version = check_version(cfg.opencode_binary, paths)
         if not authenticated(paths):
             failures.append("no OpenCode provider is authenticated")
-        status = model_status(version.binary, paths, cfg.opencode_model)
+        listing = list_models(version.binary, paths) if cfg.opencode_fallback_models else None
+        status = model_status(version.binary, paths, cfg.opencode_model, listing)
         if not status.available:
             failures.append(f"selected model unavailable: {cfg.opencode_model}")
         elif not status.verified:
@@ -658,6 +660,15 @@ def doctor(cfg: Config, *, user: str | None = None,
                 f"model {cfg.opencode_model} not verified against OpenCode's "
                 "model list; provider credential present"
             )
+        for fallback in cfg.opencode_fallback_models:
+            fb_status = model_status(version.binary, paths, fallback, listing)
+            if not fb_status.available:
+                failures.append(f"fallback model unavailable: {fallback}")
+            elif not fb_status.verified:
+                warn.append(
+                    f"fallback model {fallback} not verified against OpenCode's "
+                    "model list; provider credential present"
+                )
     except OpenCodeBootstrapError as exc:
         failures.append(str(exc))
     failures.extend(_omp_model_failures(cfg, identity.home if identity else None))

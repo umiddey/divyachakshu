@@ -391,7 +391,8 @@ class ModelStatus:
     verified: bool
 
 
-def model_status(binary: str, paths: OpenCodePaths, model: str) -> ModelStatus:
+def model_status(binary: str, paths: OpenCodePaths, model: str,
+                 models: list[str] | None = None) -> ModelStatus:
     """Probe whether `model` can run in the isolated native environment.
 
     A non-empty `models` listing is the authoritative availability set: a
@@ -401,6 +402,9 @@ def model_status(binary: str, paths: OpenCodePaths, model: str) -> ModelStatus:
     probe falls back to the credential store for the model's provider prefix
     and returns the distinct unverified-availability state documented on
     ModelStatus.
+
+    ``models`` is an optional listing the caller already fetched; None lists again.
+    Passing one lets a caller check many ids with a single ``list_models`` call.
 
     What `models` filters on (v2.0.5): its help says only "List all
     available models" with no filter flags. Observed 2026-10-11 on the
@@ -413,7 +417,8 @@ def model_status(binary: str, paths: OpenCodePaths, model: str) -> ModelStatus:
     one would false-fail models reachable via environment-provided keys that
     never touch the credential store.
     """
-    models = list_models(binary, paths)
+    if models is None:
+        models = list_models(binary, paths)
     if models:
         return ModelStatus(model in models, True)
     provider = model.split("/", 1)[0]

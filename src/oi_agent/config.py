@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tomllib
 from dataclasses import dataclass, field
@@ -108,6 +109,8 @@ class Config:
     opencode_model: str = "openai/gpt-4o-mini"
     opencode_steps: int = 30
     opencode_timeout_seconds: int = 900
+    opencode_fallback_models: list[str] = field(default_factory=list)
+    opencode_fallback_total_timeout_seconds: int = 0
     harness: str = "opencode"
     omp_binary: str = "omp"
     environment_mode: str = "workstation"
@@ -336,6 +339,10 @@ def load_config(
         opencode_timeout_seconds=_require_int(
             raw, "opencode_timeout_seconds", 900
         ),
+        opencode_fallback_models=_require_string_list(raw, "opencode_fallback_models"),
+        opencode_fallback_total_timeout_seconds=_require_int(
+            raw, "opencode_fallback_total_timeout_seconds", 0
+        ),
         harness=_require_string(raw, "harness", "opencode"),
         omp_binary=_require_string(raw, "omp_binary", "omp"),
         environment_mode=(
@@ -416,6 +423,16 @@ def _resolve_binary(binary: str) -> str | None:
     return shutil.which(binary)
 
 
+def _require_provider_model(model: str, field: str, suffix: str = "") -> None:
+    """Raise ``ValueError`` unless ``model`` is a non-empty ``provider/name`` pair."""
+    provider, separator, name = model.partition("/")
+    if not separator or not provider.strip() or not name.strip():
+        raise ValueError(f"{field} must use the exact provider/model format (got {model!r}){suffix}")
+
+
+_FALLBACK_ID_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+
+
 def _validate_open_channel_prompt_settings(cfg: Config) -> None:
     """Check the global open-channel prompt mode and each per-watch override."""
     if cfg.open_channel_prompt not in OPEN_CHANNEL_PROMPT_MODES:
@@ -445,19 +462,26 @@ def validate_config(cfg: Config) -> None:
         value = getattr(cfg, name, "")
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
-    provider, separator, model = cfg.opencode_model.partition("/")
-    if not separator or not provider.strip() or not model.strip():
-        raise ValueError(
-            "opencode_model must use the exact provider/model format "
-            f"(got {cfg.opencode_model!r})"
-        )
-    if cfg.summary_model:
-        s_provider, s_separator, s_model = cfg.summary_model.partition("/")
-        if not s_separator or not s_provider.strip() or not s_model.strip():
+    _require_provider_model(cfg.opencode_model, "opencode_model")
+    fallbacks = cfg.opencode_fallback_models
+    if not isinstance(fallbacks, list) or not all(isinstance(m, str) for m in fallbacks):
+        raise ValueError(f"opencode_fallback_models must be a list of strings (got {fallbacks!r})")
+    if len(fallbacks) > 5:
+        raise ValueError(f"opencode_fallback_models allows at most 5 entries (got {len(fallbacks)})")
+    if len(set(fallbacks)) != len(fallbacks):
+        raise ValueError(f"opencode_fallback_models must not repeat entries (got {fallbacks!r})")
+    for fb_model in fallbacks:
+        _require_provider_model(fb_model, "opencode_fallback_models entries")
+        if not _FALLBACK_ID_RE.fullmatch(fb_model):
             raise ValueError(
-                "summary_model must use the exact provider/model format "
-                f"(got {cfg.summary_model!r}); leave it empty to use opencode_model"
+                "opencode_fallback_models entries may use only letters, digits, '.', '_', ':', '/', '-' "
+                f"(got {fb_model!r})"
             )
+        if fb_model == cfg.opencode_model:
+            raise ValueError(f"opencode_fallback_models must not repeat opencode_model (got {fb_model!r})")
+    if cfg.summary_model:
+        _require_provider_model(cfg.summary_model, "summary_model",
+                                "; leave it empty to use opencode_model")
     if _resolve_binary(cfg.opencode_binary) is None:
         raise ValueError(f"opencode_binary is not executable: {cfg.opencode_binary!r}")
     if cfg.harness not in HARNESSES:
@@ -504,6 +528,7 @@ def validate_config(cfg: Config) -> None:
             raise ValueError(f"write_dirs entries must be repo-relative without '..': {entry!r}")
     for name, minimum in (("max_reply_chars", 200), ("opencode_steps", 1),
                           ("opencode_timeout_seconds", 1),
+                          ("opencode_fallback_total_timeout_seconds", 0),
                           ("max_context_messages", 40),
                           ("max_context_age_days", 1),
                           ("open_channel_runs_per_hour", 1),
@@ -517,6 +542,7 @@ def validate_config(cfg: Config) -> None:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{name} must be an integer (got {value!r})")
         maximum = {"opencode_steps": 50, "opencode_timeout_seconds": 86_400,
+                   "opencode_fallback_total_timeout_seconds": 86_400,
                    "max_context_messages": 1_000, "max_context_age_days": 365,
                    "open_channel_runs_per_hour": 60,
                    "summary_max_chars": 4_000,
@@ -680,6 +706,8 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"opencode_model = {json.dumps(cfg.opencode_model)}",
         f"opencode_steps = {cfg.opencode_steps}",
         f"opencode_timeout_seconds = {cfg.opencode_timeout_seconds}",
+        f"opencode_fallback_models = {json.dumps(list(cfg.opencode_fallback_models))}",
+        f"opencode_fallback_total_timeout_seconds = {cfg.opencode_fallback_total_timeout_seconds}",
         f"harness = {json.dumps(cfg.harness)}",
         f"omp_binary = {json.dumps(cfg.omp_binary)}",
         f"environment_mode = {json.dumps(cfg.environment_mode)}",

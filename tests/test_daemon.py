@@ -538,6 +538,27 @@ def test_omp_doctor_checks_summary_model_too(tmp_path, monkeypatch):
     assert not any(f.startswith("omp model unavailable: provider/model;") for f in failures)
 
 
+def test_opencode_doctor_names_unlisted_fallback_model(tmp_path, monkeypatch):
+    """An unlisted fallback id fails doctor; one listing serves the primary and every fallback."""
+    from oi_agent.opencode.bootstrap import model_status as real_model_status
+
+    cfg = _omp_doctor(tmp_path, monkeypatch, "", harness="opencode")
+    cfg.opencode_fallback_models = ["provider/missing"]
+    listings = []
+
+    def fake_list_models(*args):
+        listings.append(args)
+        return ["provider/model"]
+
+    monkeypatch.setattr("oi_agent.daemon.list_models", fake_list_models)
+    monkeypatch.setattr("oi_agent.daemon.model_status", real_model_status)
+
+    failures = doctor(cfg)
+
+    assert "fallback model unavailable: provider/missing" in failures
+    assert len(listings) == 1
+
+
 def test_omp_doctor_reports_unlistable_omp(tmp_path, monkeypatch):
     """A nonzero omp exit fails closed with a failure instead of a silent pass."""
     cfg = _omp_doctor(tmp_path, monkeypatch, '{"models":[]}', exit_code=1)

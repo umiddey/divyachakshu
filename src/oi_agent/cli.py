@@ -901,6 +901,7 @@ def config_show(
         "discord_token_env", "db_path", "personality", "max_reply_chars",
         "reply_delivery", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "harness", "omp_binary", "environment_mode", "write_mode",
+        "opencode_fallback_models", "opencode_fallback_total_timeout_seconds",
         "write_dirs", "max_context_messages", "max_context_age_days",
         "context_messages", "open_channel_runs_per_hour", "open_channel_prompt", "summary_model",
         "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
@@ -947,6 +948,7 @@ def config_set(
         "personality", "max_reply_chars", "reply_delivery", "discord_token_env",
         "db_path", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "harness", "omp_binary", "environment_mode", "write_mode",
+        "opencode_fallback_models", "opencode_fallback_total_timeout_seconds",
         "write_dirs", "max_context_messages", "max_context_age_days",
         "context_messages", "open_channel_runs_per_hour", "open_channel_prompt", "summary_model",
         "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
@@ -971,6 +973,8 @@ def config_set(
         raise typer.Exit(1)
     if key == "write_dirs":
         setattr(cfg, key, [p.strip().strip("/") for p in value.split(",") if p.strip().strip("/")])
+    elif key == "opencode_fallback_models":
+        setattr(cfg, key, [m.strip() for m in value.split(",") if m.strip()])
     else:
         setattr(cfg, key, _coerce(value))
     try:

@@ -93,6 +93,34 @@ def test_invalid_model_binary_and_limits_rejected(tmp_path):
             save_config(cfg, tmp_path / f"bad-{field}.toml")
 
 
+def test_fallback_chain_roundtrips_and_is_bounded(tmp_path):
+    """Fallback ids round-trip in order; repeats, the primary, bad shape, and over five are rejected."""
+    assert _valid_config().opencode_fallback_models == []
+    assert _valid_config().opencode_fallback_total_timeout_seconds == 0
+    cfg = _valid_config()
+    cfg.opencode_fallback_models = ["other/one", "other/two"]
+    cfg.opencode_fallback_total_timeout_seconds = 600
+    path = tmp_path / "fallback.toml"
+
+    save_config(cfg, path)
+    back = load_config(path)
+
+    assert back.opencode_fallback_models == ["other/one", "other/two"]
+    assert back.opencode_fallback_total_timeout_seconds == 600
+
+    for index, (models, match) in enumerate((
+        (["other/one", "other/one"], "must not repeat entries"),
+        (["provider/model"], "must not repeat opencode_model"),
+        (["bare"], "exact provider/model format"),
+        ([f"p/m{n}" for n in range(6)], "allows at most 5 entries"),
+        (["other/bad id"], "may use only letters"),
+    )):
+        cfg = _valid_config()
+        cfg.opencode_fallback_models = models
+        with pytest.raises(ValueError, match=match):
+            save_config(cfg, tmp_path / f"bad-{index}.toml")
+
+
 def test_atomic_save_preserves_previous_bytes_on_validation_failure(tmp_path):
     """Validation happens before the atomic replacement and never clobbers."""
     path = tmp_path / "config.toml"

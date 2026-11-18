@@ -35,6 +35,14 @@ async def test_root_without_token_is_forbidden(ui: tuple[TestClient, object]):
             assert resp.status == 403
 
 
+async def test_fallback_models_must_be_a_list_of_strings():
+    """The dashboard sends the fallback chain as a JSON list; a plain string is rejected."""
+    with pytest.raises(ValueError, match="opencode_fallback_models must be a list of strings"):
+        ui_server.config_from_payload({"opencode_fallback_models": "other/one"})
+    cfg = ui_server.config_from_payload({"opencode_fallback_models": ["other/one"]})
+    assert cfg.opencode_fallback_models == ["other/one"]
+
+
 async def test_token_exchange_sets_httponly_strict_cookie(ui: tuple[TestClient, object]):
     client, app = ui
     import aiohttp
