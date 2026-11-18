@@ -262,7 +262,6 @@ def _open_channel_prompt(
     return text
 
 
-
 def build_prompt(
     personality: str = "",
     primary_repo: str = "",
