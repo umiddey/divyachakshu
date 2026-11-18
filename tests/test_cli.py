@@ -1,6 +1,7 @@
 """CLI tests for the OpenCode contract and retained controls."""
 
 import json
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -96,6 +97,28 @@ def test_config_set_open_channel_globals_roundtrip(tmp_path):
     assert "summary_model = provider/summarizer" in shown.output
     assert "summary_bootstrap_messages = 150" in shown.output
     bad = runner.invoke(app, ["config", "set", "context_messages", "5", "--config", str(cfg_path)])
+    assert bad.exit_code == 1
+
+
+def test_config_set_harness_roundtrip(tmp_path, monkeypatch):
+    """harness/omp_binary are settable; only opencode|omp pass validation."""
+    cfg_path, _ = _watch_config(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "omp"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | 0o111)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    for key, value in (("harness", "omp"), ("omp_binary", "omp")):
+        result = runner.invoke(app, ["config", "set", key, value, "--config", str(cfg_path)])
+        assert result.exit_code == 0, result.output
+    shown = runner.invoke(app, ["config", "show", "--config", str(cfg_path)])
+    assert shown.exit_code == 0, shown.output
+    assert "harness = omp" in shown.output
+    assert "omp_binary = omp" in shown.output
+
+    bad = runner.invoke(app, ["config", "set", "harness", "claude", "--config", str(cfg_path)])
     assert bad.exit_code == 1
 
 

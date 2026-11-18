@@ -366,6 +366,8 @@ async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
             "summary_decay_days": 90,
             "summary_bootstrap_days": 14,
             "summary_bootstrap_messages": 150,
+            "harness": "opencode",
+            "omp_binary": "omp",
             "watches": [{
                 "guild_id": 100,
                 "repos": [str(wizard.repo)],
@@ -384,12 +386,16 @@ async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
     assert saved["summary_model"] == "stepfun/gpt-test"
     assert saved["summary_max_chars"] == 2_000
     assert saved["watches"][0]["open_channels"] == [1001]
+    assert saved["harness"] == "opencode"
+    assert saved["omp_binary"] == "omp"
 
     back = await client.post("/api/settings", json={"config": saved})
     assert (await back.json())["ok"] is True
 
     cfg = load_config(wizard.app["state"].config_path)
     assert cfg.context_messages == 25
+    assert cfg.harness == "opencode"
+    assert cfg.omp_binary == "omp"
     assert cfg.open_channel_runs_per_hour == 12
     assert cfg.summary_model == "stepfun/gpt-test"
     assert cfg.summary_decay_days == 90

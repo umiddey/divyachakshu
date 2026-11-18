@@ -140,6 +140,52 @@ def test_environment_mode_invalid_value_rejected(tmp_path):
         save_config(cfg, tmp_path / "bad-mode.toml")
 
 
+def test_old_config_without_harness_keys_loads_opencode(tmp_path):
+    """Configs written before the harness keys load with the safe defaults."""
+    path = tmp_path / "old.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n',
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.harness == "opencode"
+    assert cfg.omp_binary == "omp"
+
+
+def test_harness_omp_roundtrip_and_binary_required(tmp_path):
+    """harness=omp survives save/load; omp_binary must resolve in that mode."""
+    fake_omp = tmp_path / "fake-omp"
+    fake_omp.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_omp.chmod(fake_omp.stat().st_mode | 0o111)
+
+    cfg = _valid_config()
+    cfg.harness = "omp"
+    cfg.omp_binary = str(fake_omp)
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    back = load_config(path)
+    assert back.harness == "omp"
+    assert back.omp_binary == str(fake_omp)
+
+    missing = _valid_config()
+    missing.harness = "omp"
+    missing.omp_binary = str(tmp_path / "missing-omp")
+    with pytest.raises(ValueError, match="omp_binary"):
+        save_config(missing, tmp_path / "bad-omp.toml")
+
+
+def test_harness_invalid_value_rejected(tmp_path):
+    """Only opencode | omp are valid harnesses."""
+    cfg = _valid_config()
+    cfg.harness = "claude"
+    with pytest.raises(ValueError, match="harness"):
+        save_config(cfg, tmp_path / "bad-harness.toml")
+
+
 def test_environment_mode_legacy_auto_variants_get_migration_hint(tmp_path):
     """'auto' and case/whitespace variants fail with the exact repair command."""
     for raw_value in ("auto", "AUTO", " auto ", "Auto"):

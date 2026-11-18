@@ -254,6 +254,7 @@ _STR_FIELDS = (
     "discord_token_env", "db_path", "personality", "reply_delivery",
     "opencode_binary", "opencode_model", "environment_mode", "write_mode",
     "external_inputs", "image_inputs", "summary_model",
+    "harness", "omp_binary",
 )
 _INT_FIELDS = (
     "max_reply_chars", "opencode_steps", "opencode_timeout_seconds",

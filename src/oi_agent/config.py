@@ -13,6 +13,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "oi" / "config.toml"
 DEFAULT_SECRETS_PATH = Path.home() / ".config" / "oi" / "secrets.env"
 DEFAULT_PERSONALITY = "Talk like a smart teammate in chat, not a report generator."
 REPLY_DELIVERY_MODES = ("chunked", "single_message")
+HARNESSES = ("opencode", "omp")
 ENVIRONMENT_MODES = ("workstation", "server")
 WRITE_MODES = ("read-only", "docs-only")
 DISCORD_MAX_MESSAGE_CHARS = 2_000
@@ -101,6 +102,8 @@ class Config:
     opencode_model: str = "openai/gpt-4o-mini"
     opencode_steps: int = 30
     opencode_timeout_seconds: int = 900
+    harness: str = "opencode"
+    omp_binary: str = "omp"
     environment_mode: str = "workstation"
     write_mode: str = "read-only"
     write_dirs: list[str] = field(default_factory=list)
@@ -313,6 +316,8 @@ def load_config(
         opencode_timeout_seconds=_require_int(
             raw, "opencode_timeout_seconds", 900
         ),
+        harness=_require_string(raw, "harness", "opencode"),
+        omp_binary=_require_string(raw, "omp_binary", "omp"),
         environment_mode=(
             "workstation" if legacy_environment_mode
             else _require_string(raw, "environment_mode", "workstation")
@@ -394,7 +399,7 @@ def validate_config(cfg: Config) -> None:
     Args:
         cfg: Configuration to validate before persistence or runtime use.
     """
-    for name in ("discord_token_env", "db_path", "opencode_binary", "opencode_model"):
+    for name in ("discord_token_env", "db_path", "opencode_binary", "opencode_model", "omp_binary"):
         value = getattr(cfg, name, "")
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
@@ -413,6 +418,10 @@ def validate_config(cfg: Config) -> None:
             )
     if _resolve_binary(cfg.opencode_binary) is None:
         raise ValueError(f"opencode_binary is not executable: {cfg.opencode_binary!r}")
+    if cfg.harness not in HARNESSES:
+        raise ValueError(f"harness must be one of {HARNESSES!r} (got {cfg.harness!r})")
+    if cfg.harness == "omp" and _resolve_binary(cfg.omp_binary) is None:
+        raise ValueError(f"omp_binary is not executable: {cfg.omp_binary!r}")
     if cfg.reply_delivery not in REPLY_DELIVERY_MODES:
         raise ValueError(
             f"reply_delivery must be one of {REPLY_DELIVERY_MODES!r} "
@@ -618,6 +627,8 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"opencode_model = {json.dumps(cfg.opencode_model)}",
         f"opencode_steps = {cfg.opencode_steps}",
         f"opencode_timeout_seconds = {cfg.opencode_timeout_seconds}",
+        f"harness = {json.dumps(cfg.harness)}",
+        f"omp_binary = {json.dumps(cfg.omp_binary)}",
         f"environment_mode = {json.dumps(cfg.environment_mode)}",
         f"write_mode = {json.dumps(cfg.write_mode)}",
         f"write_dirs = {json.dumps(list(cfg.write_dirs))}",

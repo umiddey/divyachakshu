@@ -900,7 +900,7 @@ def config_show(
     for name in (
         "discord_token_env", "db_path", "personality", "max_reply_chars",
         "reply_delivery", "opencode_binary", "opencode_model", "opencode_steps",
-        "opencode_timeout_seconds", "environment_mode", "write_mode",
+        "opencode_timeout_seconds", "harness", "omp_binary", "environment_mode", "write_mode",
         "write_dirs", "max_context_messages", "max_context_age_days",
         "context_messages", "open_channel_runs_per_hour", "summary_model",
         "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
@@ -944,7 +944,7 @@ def config_set(
     allowed = {
         "personality", "max_reply_chars", "reply_delivery", "discord_token_env",
         "db_path", "opencode_binary", "opencode_model", "opencode_steps",
-        "opencode_timeout_seconds", "environment_mode", "write_mode",
+        "opencode_timeout_seconds", "harness", "omp_binary", "environment_mode", "write_mode",
         "write_dirs", "max_context_messages", "max_context_age_days",
         "context_messages", "open_channel_runs_per_hour", "summary_model",
         "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
