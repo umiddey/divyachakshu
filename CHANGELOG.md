@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-11-18
 
 - New `harness = "omp"` option. Tool-free prompts (classifier, context-request
   fallback, summaries) run through omp with every tool, session, and extension
