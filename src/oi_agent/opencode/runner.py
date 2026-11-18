@@ -285,6 +285,43 @@ def _error_class(event: dict[str, Any]) -> str:
     return "opencode_error"
 
 
+# Classes a fallback attempt may retry on. Provider classes come only from the
+# integer ``error.status`` of the stream's last error event.
+RETRYABLE_CLASSES = frozenset({"provider_rate_limited", "provider_unavailable", "provider_server_error", "timeout"})
+
+
+def _provider_status(event: dict[str, Any]) -> int | None:
+    """Return the integer HTTP status of an error event, or None.
+
+    Only a real integer from 100 to 599 counts: booleans, strings, and other
+    values are ignored, and no other field is read.
+    """
+    err = event.get("error")
+    status = err.get("status") if isinstance(err, dict) else None
+    if type(status) is int and 100 <= status <= 599:
+        return status
+    return None
+
+
+def _provider_class(status: int | None) -> str | None:
+    """Map a provider HTTP status to its retryable class, or None."""
+    if status == 429:
+        return "provider_rate_limited"
+    if status in (502, 503, 504):
+        return "provider_unavailable"
+    if status is not None and 500 <= status <= 599:
+        return "provider_server_error"
+    return None
+
+
+def _retry_class(error_class: str, events: list[dict[str, Any]]) -> str | None:
+    """Return the retryable class that justifies a fallback attempt, or None."""
+    if error_class == "timeout":
+        return "timeout"
+    errors = [event for event in events if event.get("type") == "error"]
+    return _provider_class(_provider_status(errors[-1])) if errors else None
+
+
 # Pinned OpenCode ``run --format json`` event contract (verified against a
 # controlled local v1.18.x run and the public part schema):
 #
