@@ -170,8 +170,8 @@ replacement. Defaults:
 | `environment_mode` | `workstation` | `workstation` or `server`; legacy `auto` fails with a migration error. |
 | `write_mode` | `read-only` | `read-only`, or `docs-only` to allow edit access for documentation paths. |
 | `write_dirs` | `[]` | Directories `docs-only` may write; none usable means it refuses to widen. |
-| `opencode_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids; no repeats and none equal to `opencode_model`. Doctor checks each id. Runs do not use this list yet. |
-| `opencode_fallback_total_timeout_seconds` | `0` | Wall-clock cap across all fallback attempts; `0` uses `opencode_timeout_seconds`. |
+| `opencode_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids; no repeats and none equal to `opencode_model`. Doctor checks each id. On a provider error (429, 502, 503, 504, other 5xx) or a timeout, the next model runs the same request; the reply ends with `answered by <model>` when a fallback answers. Raw-prompt paths and web research stay on `opencode_model`. |
+| `opencode_fallback_total_timeout_seconds` | `0` | One wall-clock budget across all attempts, primary included. `0` uses `opencode_timeout_seconds`, so a primary that times out leaves no time for a fallback. A retry starts only if time remains. Docs written by a failed attempt stay on disk and are attached to the answering run. |
 | `max_context_messages` | `200` (max 1000) | Bounded history window shown to the model. |
 | `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
 | `context_messages` | `40` (10–`max_context_messages`) | Newest messages shown to the model alongside the rolling summary. |

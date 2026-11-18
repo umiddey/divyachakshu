@@ -9,6 +9,7 @@
 - `oi doctor` with `harness = "omp"` checks that omp lists the configured chat
   and summary models and names the `omp login` command when one is missing.
 - **Breaking:** open channels no longer get the full OI system prompt. They get minimal plumbing (Discord identity, repository list, untrusted-data rule, no-credentials rule, reply marker, silence token). The global `open_channel_prompt` (default `none`, or `personality`) sets the mode; `open_channel_prompts` and `oi config open-channel-prompt <id> none|personality|inherit` override one channel. Open-channel runs are read-only and do not read memory. Non-open-channel prompts are unchanged.
+- Model fallback: `opencode_fallback_models` is an ordered chain. A provider error (429, 502, 503, 504, other 5xx) or a timeout on one model runs the same request on the next model. A fallback answer ends with `answered by <model>`. `opencode_fallback_total_timeout_seconds` caps the whole chain. Raw-prompt paths and web research stay single-model. The default (empty list) is unchanged.
 
 ## 0.2.0 - 2026-11-18
 

@@ -246,3 +246,17 @@ async def test_total_failure_has_no_footer_or_model(tmp_path, monkeypatch):
     assert not reply.ok
     assert reply.model is None
     assert "answered by" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_empty_fallback_list_is_the_unchanged_single_model_path(tmp_path, monkeypatch):
+    """Golden: with no fallback list, one primary call, the primary timeout, no footer."""
+    cfg = _config(opencode_fallback_models=[])
+    reply, calls = await _run(tmp_path, monkeypatch, cfg, [_success()])
+    assert reply.ok
+    assert reply.text == "hello"
+    assert reply.model == PRIMARY
+    assert reply.attachments == ()
+    assert len(calls) == 1
+    assert calls[0]["model"] == PRIMARY
+    assert calls[0]["timeout_seconds"] == cfg.opencode_timeout_seconds
