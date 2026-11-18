@@ -1,8 +1,9 @@
 # OI Agent
 
 OI ("ultron" on Discord) is a standalone bot that watches configured Discord
-channels or whole guilds, answers only when explicitly triggered, and runs a
-read-only audit of local git clones through [OpenCode](https://opencode.ai).
+channels or whole guilds, answers only when explicitly triggered (configured
+open channels relax this; see below), and runs a read-only audit of local
+git clones through [OpenCode](https://opencode.ai).
 OI owns Discord transport, allowlists, rate caps, and delivery; OpenCode owns
 model, tools, and repository exploration. With `external_inputs = "read-only"`
 it also does public web research in an isolated second run.
@@ -78,7 +79,7 @@ oi run                              # foreground run
   unit) cover server setups.
 - Other commands: `oi pause` / `oi resume` (global posting switch), `oi
   doctor` (preflight: OpenCode binary, model id, repos, token, state), `oi
-  queue status|retry|purge`, `oi session list|forget`, `oi memory status`.
+  queue status|retry|purge`, `oi session list|forget|show`, `oi memory status`.
 
 ### systemd user service
 
@@ -158,7 +159,7 @@ replacement. Defaults:
 | Key | Default | Meaning |
 |---|---|---|
 | `discord_token_env` | `OI_DISCORD_TOKEN` | Name of the env var holding the Discord token. |
-| `db_path` | `~/.local/state/oi/state.db` | SQLite state (queue, sessions, memory). |
+| `db_path` | `~/.local/state/oi/state.db` | SQLite state (queue, summaries, memory). |
 | `personality` | teammate-style default | Persona text handed to the model. |
 | `max_reply_chars` | `2000` | Reply length cap. |
 | `reply_delivery` | `chunked` | `chunked` or `single_message` (must fit Discord's 2000-char limit). |
@@ -169,16 +170,21 @@ replacement. Defaults:
 | `environment_mode` | `workstation` | `workstation` or `server`; legacy `auto` fails with a migration error. |
 | `write_mode` | `read-only` | `read-only`, or `docs-only` to allow edit access for documentation paths. |
 | `write_dirs` | `[]` | Directories `docs-only` may write; none usable means it refuses to widen. |
-| `max_session_turns` | `30` | Completed deliveries before a conversation session rotates. |
-| `session_ttl_days` | `7` | Idle days before rotation; `0` disables idle rotation only. |
 | `max_context_messages` | `200` (max 1000) | Bounded history window shown to the model. |
 | `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
+| `context_messages` | `40` (10–`max_context_messages`) | Newest messages shown to the model alongside the rolling summary. |
+| `open_channel_runs_per_hour` | `6` (1–60) | Model-run cap per open channel per hour; over the cap, jobs are deferred. |
+| `summary_model` | `` (empty = `opencode_model`) | Model used for summary runs. |
+| `summary_max_chars` | `1500` (600–4000) | Rendered rolling-summary size cap. |
+| `summary_decay_days` | `60` (7–730) | Age after which non-durable summary items drop. |
+| `summary_bootstrap_days` | `30` (1–365) | Cold-start lookback cap for a brand-new summary. |
+| `summary_bootstrap_messages` | `300` (0–2000) | Cold-start message cap for a brand-new summary. |
 | `external_inputs` | `disabled` | `disabled` or `read-only` (public web research; see below). |
 | `max_external_evidence_items` | `8` (1–50) | Cap on evidence items and research source links. |
 | `max_attachments` | `4` (0–16) | Attachments accepted per message. |
 | `max_attachment_bytes` | `8388608` (max 33554432) | Per-attachment byte cap. |
 | `image_inputs` | `off` | `off`, or `on` to pass images as real image files. |
-| `watches` | `[]` | `[[watch]]` entries: `channel_id` or `guild_id`, `repos`, `bot_user_id`, `post_hourly_cap` (default 3), `ignored_channels`, `allowed_channels`, `reminder_channel_id` (0 = no reminders in that server). |
+| `watches` | `[]` | `[[watch]]` entries: `channel_id` or `guild_id`, `repos`, `bot_user_id`, `post_hourly_cap` (default 3), `ignored_channels`, `allowed_channels`, `reminder_channel_id` (0 = no reminders in that server), `open_channels` (see Open channels). |
 
 ## Using the bot in Discord
 
@@ -188,19 +194,22 @@ or `#bugreport`, or the bot's name used as a direct call (`Ultron, …`,
 `hey ultron`, `…, ultron?`). A reply to one of the bot's messages counts
 too, unless it addresses someone else (other `<@…>` markup, or a direct
 call to another member or bot). Everything else is ignored (log reason:
-`no explicit trigger`). Replies are capped at `max_reply_chars` and
+`no explicit trigger`) — unless the channel is an open channel (below).
+Replies are capped at `max_reply_chars` and
 delivered chunked by default.
 
-Conversation sessions are scoped to (conversation, repository) and rotate
-automatically after `max_session_turns` completed deliveries or
-`session_ttl_days` idle days.
+OI is stateless between calls: every reply runs in a brand-new OpenCode
+session, fed the conversation's rolling summary (stored in OI's own database)
+plus the newest `context_messages` messages. There is no session rotation or
+TTL; `!fresh`/`!new` and `oi session forget --conversation <id>` delete a
+summary so it rebuilds from scratch.
 
 Commands (the command must be the leading token; multi-line arguments are one
 command):
 
 | Input | Effect |
 |---|---|
-| `!fresh` / `!new` | Starts a new session for this conversation; optionally after the bot mention. |
+| `!fresh` / `!new` | Clears this conversation's rolling summary so the next reply starts fresh; optionally after the bot mention. |
 | `!search <topic>` | Forces public web research on `<topic>`. |
 | `!news <topic>` | Same, framed as news lookup. |
 | `!web <topic>` | Alias of `!search`. |
@@ -228,6 +237,46 @@ Merge-request audits: `MR 188` or `!188` (GitLab), `PR 188` or
 `pull request 188` (GitHub), or a canonical merge-request URL triggers a
 read-only review instead of the checkout audit; bare numbers are ordinary
 text.
+
+## Open channels
+
+An *open channel* is a watch channel where OI reads every message — humans
+and other bots, no mention needed — and replies only when it has something
+concrete to add: an unanswered question, a decision to contribute, real
+information. When it has nothing to add it stays silent: the model returns
+the `[[OI_SILENT]]` token instead of text and nothing is posted.
+
+Caps keep loops and costs bounded:
+
+- Another bot (or OI itself) is followed for at most 4 consecutive turns;
+  any human message resets the count.
+- Each open channel runs at most `open_channel_runs_per_hour` model runs per
+  hour (default 6); over the cap, jobs are deferred, not dropped. Summary
+  updates count toward it.
+- A message asking for more history than `max_context_messages` gets a note
+  that only the newest `max_context_messages` messages can be read.
+
+Memory stays bounded: every reply sees the conversation's rolling summary
+(rewritten rather than appended, capped at `summary_max_chars`, stale items
+decay after `summary_decay_days`) plus the newest `context_messages`
+messages. A brand-new summary cold-starts from at most
+`summary_bootstrap_days`/`summary_bootstrap_messages` of history, so a
+years-old channel is never read end to end.
+
+Commands (`oi config show` lists each watch's `open_channels`):
+
+```bash
+oi config watch-add --guild-id 999 --repo /srv/repos/app \
+  --open-channels 222,333                      # open channels on the new watch
+oi config open-channel-add 444 --watch 999     # one more, later
+oi config open-channel-remove 222              # close one again
+```
+
+A single-channel watch can only open the channel it already watches
+(`oi config watch-add --channel-id 222 --repo ... --open-channels 222`).
+Inspect, print, and reset what OI remembers about a conversation with
+`oi session list`, `oi session show --conversation <id>` (local print, never
+logged), and `oi session forget --conversation <id>`.
 
 ## How web research works
 
