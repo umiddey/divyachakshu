@@ -222,7 +222,6 @@ async def test_external_evidence_run_answers_in_disposable_storage(runner_env):
         )
         assert reply.ok is True
         assert reply.text == "UNIQUE_MARKER"
-        assert reply.session_id is None  # external runs never return a session
         # No repository was audited: external evidence asks carry "none" only
         # because there is no review reference in the question.
         assert reply.sha == "none"
@@ -265,7 +264,6 @@ async def test_external_evidence_mr_ask_is_a_real_snapshot_review(runner_env):
         # Correction 9: resolved review with exact provenance, never sha=none.
         assert reply.ok is True
         assert reply.sha == f"MR !188 base {base_sha} head {head_sha}"
-        assert reply.session_id is None
 
         data = json.loads(trace.read_text(encoding="utf-8"))
         head_dir = Path(data["cwd"])
@@ -323,7 +321,6 @@ async def test_external_evidence_unresolved_mr_ref_fails_without_run(runner_env)
         )
         assert reply.ok is False
         assert reply.error_class == "review_ref_unavailable"
-        assert reply.session_id is None
         assert "repository" in reply.text or "URL" in reply.text
         assert "PUBLIC_EVIDENCE_BODY" not in reply.text
         assert not trace.exists()  # the fake native binary was never invoked

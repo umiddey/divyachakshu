@@ -48,8 +48,8 @@ def _fixture(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_opencode_session_safety_and_project_isolation(tmp_path):
-    """Real model execution preserves sessions, refuses writes, and hides secrets."""
+async def test_real_opencode_stateless_safety_and_project_isolation(tmp_path):
+    """Real model execution refuses writes and hides secrets; nothing resumes."""
     repo = _fixture(tmp_path)
     cfg = Config(
         opencode_model=os.environ["OI_REAL_OPENCODE_MODEL"],
@@ -59,16 +59,9 @@ async def test_real_opencode_session_safety_and_project_isolation(tmp_path):
     runner = OpenCodeRunner(cfg)
 
     first = await runner.run(target, "e2e", "Read marker.txt and report its unique marker.", "")
-    assert first.ok and first.session_id
+    assert first.ok
     assert "REAL_OPENCODE_UNIQUE_MARKER" in first.text
     assert first.sha in first.text
-
-    followup = await runner.run(
-        target, "e2e", "Continue this session and repeat only the marker.", "",
-        session_id=first.session_id,
-    )
-    assert followup.ok
-    assert "REAL_OPENCODE_UNIQUE_MARKER" in followup.text
 
     before = hashlib.sha256((repo / "marker.txt").read_bytes()).hexdigest()
     refused = await runner.run(

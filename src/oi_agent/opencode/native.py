@@ -80,7 +80,6 @@ def build_argv(
     model: str,
     agent: str,
     *,
-    session_id: str | None = None,
     files: list[Path] | None = None,
 ) -> list[str]:
     """Build the documented native v2 ``run`` argument vector.
@@ -91,7 +90,6 @@ def build_argv(
     Args:
         model: Configured ``provider/model`` identifier.
         agent: Native agent id selected via ``--agent``.
-        session_id: Optional session to resume. Never set for external runs.
         files: Optional image paths attached with repeated ``--file`` flags.
 
     Returns:
@@ -106,8 +104,6 @@ def build_argv(
     ]
     for path in files or ():
         argv.extend(["--file", str(path)])
-    if session_id:
-        argv.extend(["--session", session_id])
     return argv
 
 

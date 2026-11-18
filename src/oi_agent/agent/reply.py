@@ -7,13 +7,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Reply:
-    """One bounded response and its audit/session metadata.
+    """One bounded response and its audit metadata.
 
     Args:
         text: Visible Discord reply body.
         sha: Repository SHA used for the audit, or ``none``.
         ok: Whether the response is a genuine successful audit.
-        session_id: OpenCode session ID returned by a successful run.
         error_class: Bounded machine-readable failure category.
         attachments: Absolute paths of .md/.txt docs written during the run
             for Discord file upload (docs-only mode, bounded, best-effort).
@@ -22,7 +21,6 @@ class Reply:
     text: str
     sha: str
     ok: bool = True
-    session_id: str | None = None
     error_class: str | None = None
     had_content: bool = False
     attachments: tuple[str, ...] = ()

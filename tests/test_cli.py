@@ -473,8 +473,8 @@ def test_queue_purge_command(tmp_path):
     store.admit_mention_job(3001, 4001, 5001, repo)
     claimed = store.claim_next_conversation_jobs(lease_duration_seconds=60)
     assert claimed is not None
-    store.commit_outbox("b1", 4001, 5001, repo, [3001], ["chunk1"], "s1")
-    store.complete_delivery_batch("b1", repo, "s1")
+    store.commit_outbox("b1", 4001, 5001, repo, [3001], ["chunk1"])
+    store.complete_delivery_batch("b1")
     store._conn.execute("UPDATE mention_jobs SET updated_at = updated_at - 100 WHERE status = 'done'")
     store._conn.execute("UPDATE delivery_batches SET updated_at = updated_at - 100 WHERE status = 'done'")
     store._conn.commit()
@@ -1648,7 +1648,7 @@ def test_config_set_rejects_removed_session_keys(tmp_path):
 
 
 def _session_config(tmp_path):
-    """Create an isolated CLI config and session-state database path."""
+    """Create an isolated CLI config and state database path."""
     cfg_path, repo = _watch_config(tmp_path)
     db_path = tmp_path / "sessions.db"
     result = runner.invoke(app, [
@@ -1659,22 +1659,21 @@ def _session_config(tmp_path):
 
 
 def test_session_list_metadata_filter_and_empty(tmp_path, monkeypatch):
-    """Session listing exposes accurate metadata without session history or IDs."""
+    """Summary listing exposes metadata only, never the stored summary text."""
     cfg_path, repo, db_path = _session_config(tmp_path)
     empty = runner.invoke(app, ["session", "list", "--config", str(cfg_path)])
     assert empty.exit_code == 0, empty.output
-    assert "No OpenCode session mappings" in empty.output
+    assert "No conversation summaries" in empty.output
     store = Store(db_path)
     try:
-        store.set_opencode_session(111, repo, "private-session-one")
-        store.set_opencode_session(222, repo, "private-session-two")
+        store.set_summary(111, '{"v":1,"items":[{"section":"now","topic":"t"}]}', 500, max_chars=1500)
+        store.set_summary(222, '{"v":1,"items":[]}', 900, max_chars=1500)
         store._conn.execute(
-            "UPDATE opencode_sessions SET turns=17, updated_at=? WHERE conversation_id=111",
+            "UPDATE conversation_summaries SET updated_at=? WHERE conversation_id=111",
             (1_700_000_000,),
         )
     finally:
         store.close()
-    monkeypatch.setattr(cli.time, "time", lambda: 1_700_000_065)
     monkeypatch.setattr(cli, "console", cli.Console(width=240))
     result = runner.invoke(app, [
         "session", "list", "--conversation", "111", "--config", str(cfg_path),
@@ -1682,69 +1681,54 @@ def test_session_list_metadata_filter_and_empty(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "111" in result.output
     assert "222" not in result.output
-    assert str(repo.resolve()) in result.output
-    assert "17" in result.output
+    assert "500" in result.output
     assert "2023-11-14T22:13:20+00:00" in result.output
-    assert "65" in result.output
-    assert "private-session" not in result.output
-    all_sessions = runner.invoke(app, ["session", "list", "--config", str(cfg_path)])
-    assert all_sessions.exit_code == 0, all_sessions.output
-    assert "111" in all_sessions.output and "222" in all_sessions.output
+    assert "items" not in result.output
+    all_summaries = runner.invoke(app, ["session", "list", "--config", str(cfg_path)])
+    assert all_summaries.exit_code == 0, all_summaries.output
+    assert "111" in all_summaries.output and "222" in all_summaries.output
 
 
-def test_session_forget_is_scoped_to_conversation_and_repo(tmp_path):
-    """Forgetting one repo or all repos never affects another conversation."""
+def test_session_forget_clears_one_conversation_summary(tmp_path):
+    """Forgetting one conversation never affects another conversation's summary."""
     cfg_path, repo, db_path = _session_config(tmp_path)
-    other_repo = tmp_path / "other-repo"
     store = Store(db_path)
     try:
-        store.set_opencode_session(111, repo, "one")
-        store.set_opencode_session(111, other_repo, "two")
-        store.set_opencode_session(222, repo, "three")
+        store.set_summary(111, '{"v":1,"items":[]}', 1, max_chars=1500)
+        store.set_summary(222, '{"v":1,"items":[]}', 2, max_chars=1500)
     finally:
         store.close()
     result = runner.invoke(app, [
-        "session", "forget", "--conversation", "111", "--repo", str(repo),
-        "--config", str(cfg_path),
+        "session", "forget", "--conversation", "111", "--config", str(cfg_path),
     ])
     assert result.exit_code == 0, result.output
+    assert "forgot summary for conversation 111" in result.output
     store = Store(db_path)
     try:
-        assert store.get_opencode_session(111, repo) is None
-        assert store.get_opencode_session(111, other_repo) == "two"
-        assert store.get_opencode_session(222, repo) == "three"
-    finally:
-        store.close()
-    result = runner.invoke(app, [
-        "session", "forget", "--conversation", "111", "--all", "--config", str(cfg_path),
-    ])
-    assert result.exit_code == 0, result.output
-    store = Store(db_path)
-    try:
-        assert store.list_opencode_sessions(111) == []
-        assert store.get_opencode_session(222, repo) == "three"
+        assert store.get_summary(111) is None
+        assert store.get_summary(222) == '{"v":1,"items":[]}'
     finally:
         store.close()
     repeated = runner.invoke(app, [
-        "session", "forget", "--conversation", "111", "--all", "--config", str(cfg_path),
+        "session", "forget", "--conversation", "111", "--config", str(cfg_path),
     ])
     assert repeated.exit_code == 0, repeated.output
-    assert "forgot 0" in repeated.output
+    assert "no summary stored" in repeated.output
 
 
 @pytest.mark.parametrize("arguments", [
     ["--all"],
-    ["--conversation", "111"],
-    ["--conversation", "111", "--repo", "/repo", "--all"],
-    ["--conversation", "0", "--all"],
-    ["--conversation", "-1", "--all"],
+    ["--repo", "/repo"],
+    ["--conversation", "111", "--repo", "/repo"],
+    ["--conversation", "0"],
+    ["--conversation", "-1"],
 ])
-def test_session_forget_invalid_scope_never_changes_mappings(tmp_path, arguments):
-    """Missing, ambiguous, and non-positive scopes cannot delete stored sessions."""
+def test_session_forget_invalid_scope_never_changes_summaries(tmp_path, arguments):
+    """Missing, ambiguous, and non-positive scopes cannot delete stored summaries."""
     cfg_path, repo, db_path = _session_config(tmp_path)
     store = Store(db_path)
     try:
-        store.set_opencode_session(111, repo, "keep-me")
+        store.set_summary(111, '{"v":1,"items":[]}', 1, max_chars=1500)
     finally:
         store.close()
     result = runner.invoke(app, [
@@ -1753,7 +1737,7 @@ def test_session_forget_invalid_scope_never_changes_mappings(tmp_path, arguments
     assert result.exit_code != 0
     store = Store(db_path)
     try:
-        assert store.get_opencode_session(111, repo) == "keep-me"
+        assert store.get_summary(111) == '{"v":1,"items":[]}'
     finally:
         store.close()
 

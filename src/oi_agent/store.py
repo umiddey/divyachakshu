@@ -25,16 +25,12 @@ CREATE TABLE IF NOT EXISTS posts (
     channel_id INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_posts_channel_ts ON posts(channel_id, ts);
-CREATE TABLE IF NOT EXISTS opencode_sessions (
-    conversation_id INTEGER NOT NULL,
-    repo_path TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    updated_at INTEGER NOT NULL,
-    turns INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (conversation_id, repo_path)
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    conversation_id INTEGER PRIMARY KEY,
+    summary_json TEXT NOT NULL,
+    last_summarized_message_id INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_opencode_sessions_updated
-    ON opencode_sessions(updated_at);
 CREATE TABLE IF NOT EXISTS discord_scopes (
     scope_id TEXT PRIMARY KEY,
     owner_channel_id INTEGER NOT NULL,
@@ -65,7 +61,6 @@ CREATE TABLE IF NOT EXISTS delivery_batches (
     owner_channel_id INTEGER NOT NULL,
     repo_path TEXT NOT NULL,
     status TEXT NOT NULL,
-    candidate_session_id TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     available_at INTEGER NOT NULL,
     lease_until INTEGER NOT NULL DEFAULT 0,
@@ -329,9 +324,16 @@ def _ensure_schema_compatibility(conn: sqlite3.Connection) -> None:
             "ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
         )
         conn.execute("UPDATE member_profiles_v2 SET created_at=updated_at")
-    session_columns = {row[1] for row in conn.execute("PRAGMA table_info(opencode_sessions)")}
-    if "turns" not in session_columns:
-        conn.execute("ALTER TABLE opencode_sessions ADD COLUMN turns INTEGER NOT NULL DEFAULT 0")
+    # Stateless cutover: resumed-session state is obsolete; drop it on open.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='opencode_sessions'"
+    ).fetchone():
+        conn.execute("DROP TABLE opencode_sessions")
+    batch_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(delivery_batches)").fetchall()
+    }
+    if "candidate_session_id" in batch_columns:
+        conn.execute("ALTER TABLE delivery_batches DROP COLUMN candidate_session_id")
     reminder_columns = {row[1] for row in conn.execute("PRAGMA table_info(reminders)").fetchall()}
     if "one_shot" not in reminder_columns:
         conn.execute("ALTER TABLE reminders ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0")
@@ -413,7 +415,7 @@ class Store:
         )
 
     def last_activity(self) -> int:
-        """Newest recorded activity timestamp (post or OpenCode session).
+        """Newest recorded activity timestamp (post or conversation summary).
 
         Bounded metadata only: a unix timestamp, never message content.
         Returns 0 when nothing has been recorded yet.
@@ -421,7 +423,7 @@ class Store:
         row = self._conn.execute(
             "SELECT MAX(t) FROM ("
             " SELECT MAX(ts) AS t FROM posts"
-            " UNION ALL SELECT MAX(updated_at) AS t FROM opencode_sessions)"
+            " UNION ALL SELECT MAX(updated_at) AS t FROM conversation_summaries)"
         ).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
@@ -1245,103 +1247,77 @@ class Store:
         """
         return str(Path(repo_path).expanduser().resolve())
 
-    def get_opencode_session(self, conversation_id: int,
-                             repo_path: str | Path) -> str | None:
-        """Return the stored OpenCode session ID for a conversation/repo pair.
+    def get_summary(self, conversation_id: int) -> str | None:
+        """Return the stored rolling summary JSON for one conversation.
 
         Args:
             conversation_id (int): Snowflake ID of the channel or thread conversation.
-            repo_path (str | Path): Path to the audited repository.
 
         Returns:
-            str | None: Stored OpenCode session ID, or None if not set.
+            str | None: Summary document as JSON text, or None if absent.
         """
         row = self._conn.execute(
-            "SELECT session_id FROM opencode_sessions "
-            "WHERE conversation_id=? AND repo_path=?",
-            (conversation_id, self._repo_key(repo_path)),
+            "SELECT summary_json FROM conversation_summaries WHERE conversation_id=?",
+            (conversation_id,),
         ).fetchone()
         return row[0] if row else None
 
-    def get_opencode_session_info(self, conversation_id: int, repo_path: str | Path) -> dict | None:
-        """Return bounded session metadata for one canonical conversation/repository pair."""
-        row = self._conn.execute(
-            "SELECT conversation_id, repo_path, session_id, turns, updated_at FROM opencode_sessions "
-            "WHERE conversation_id=? AND repo_path=?",
-            (conversation_id, self._repo_key(repo_path)),
-        ).fetchone()
-        return dict(zip(("conversation_id", "repo_path", "session_id", "turns", "updated_at"), row)) if row else None
+    def set_summary(self, conversation_id: int, summary_json: str,
+                    last_summarized_message_id: int, *, max_chars: int) -> None:
+        """Replace one conversation's complete rolling summary.
 
-    def list_opencode_sessions(self, conversation_id: int | None = None) -> list[dict]:
-        """List session metadata in conversation/repository order, optionally scoped."""
-        query = "SELECT conversation_id, repo_path, session_id, turns, updated_at FROM opencode_sessions"
-        params = () if conversation_id is None else (conversation_id,)
+        Args:
+            conversation_id (int): Snowflake ID of the channel or thread conversation.
+            summary_json (str): Complete summary document as JSON text.
+            last_summarized_message_id (int): Newest message id folded into the summary.
+            max_chars (int): Render cap in characters; the stored JSON must stay
+                under twice that bound.
+        """
+        if len(summary_json) > 2 * max_chars:
+            raise ValueError("summary_json exceeds twice the render cap")
+        self._conn.execute(
+            "INSERT INTO conversation_summaries(conversation_id, summary_json, "
+            "last_summarized_message_id, updated_at) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(conversation_id) DO UPDATE SET "
+            "summary_json=excluded.summary_json, "
+            "last_summarized_message_id=excluded.last_summarized_message_id, "
+            "updated_at=excluded.updated_at",
+            (conversation_id, summary_json, int(last_summarized_message_id), int(time.time())),
+        )
+
+    def forget_summary(self, conversation_id: int) -> bool:
+        """Delete one conversation's summary; return whether a row existed.
+
+        Args:
+            conversation_id (int): Snowflake ID of the channel or thread conversation.
+
+        Returns:
+            bool: True if a summary was deleted, False if none was stored.
+        """
+        return self._conn.execute(
+            "DELETE FROM conversation_summaries WHERE conversation_id=?",
+            (conversation_id,),
+        ).rowcount > 0
+
+    def list_summaries(self, conversation_id: int | None = None) -> list[dict]:
+        """List summary metadata in conversation order, optionally scoped.
+
+        Args:
+            conversation_id (int | None): Optional conversation filter.
+
+        Returns:
+            list[dict]: Rows with conversation_id, summary_json,
+            last_summarized_message_id, and updated_at.
+        """
+        query = ("SELECT conversation_id, summary_json, last_summarized_message_id, updated_at "
+                 "FROM conversation_summaries")
+        params: tuple = ()
         if conversation_id is not None:
             query += " WHERE conversation_id=?"
-        rows = self._conn.execute(query + " ORDER BY conversation_id, repo_path", params)
-        keys = ("conversation_id", "repo_path", "session_id", "turns", "updated_at")
+            params = (conversation_id,)
+        rows = self._conn.execute(query + " ORDER BY conversation_id", params)
+        keys = ("conversation_id", "summary_json", "last_summarized_message_id", "updated_at")
         return [dict(zip(keys, row)) for row in rows]
-
-    def forget_opencode_sessions(self, conversation_id: int, repo_path: str | Path | None = None) -> int:
-        """Forget mappings only within the required conversation, optionally for one repository."""
-        if repo_path is None:
-            return self._conn.execute(
-                "DELETE FROM opencode_sessions WHERE conversation_id=?", (conversation_id,)
-            ).rowcount
-        return self._conn.execute(
-            "DELETE FROM opencode_sessions WHERE conversation_id=? AND repo_path=?",
-            (conversation_id, self._repo_key(repo_path)),
-        ).rowcount
-
-    def prune_expired_sessions(self, ttl_days: int) -> int:
-        """Remove idle mappings at the TTL boundary; zero disables expiry."""
-        if isinstance(ttl_days, bool) or not isinstance(ttl_days, int) or ttl_days < 0:
-            raise ValueError("ttl_days must be a non-negative integer")
-        if ttl_days == 0:
-            return 0
-        return self._conn.execute(
-            "DELETE FROM opencode_sessions WHERE updated_at <= ?",
-            (int(time.time()) - ttl_days * 86400,),
-        ).rowcount
-
-    def set_opencode_session(self, conversation_id: int, repo_path: str | Path,
-                             session_id: str) -> None:
-        """Persist one successful OpenCode session mapping.
-
-        Args:
-            conversation_id (int): Snowflake ID of the channel or thread conversation.
-            repo_path (str | Path): Path to the audited repository.
-            session_id (str): OpenCode session identifier string.
-
-        Returns:
-            None: No return value.
-        """
-        if not session_id.strip():
-            raise ValueError("session_id must be non-empty")
-        self._conn.execute(
-            "INSERT INTO opencode_sessions(conversation_id,repo_path,session_id,updated_at) "
-            "VALUES(?,?,?,?) ON CONFLICT(conversation_id,repo_path) DO UPDATE SET "
-            "turns=CASE WHEN opencode_sessions.session_id=excluded.session_id "
-            "THEN opencode_sessions.turns ELSE 0 END, "
-            "session_id=excluded.session_id, updated_at=excluded.updated_at",
-            (conversation_id, self._repo_key(repo_path), session_id, int(time.time())),
-        )
-
-    def clear_opencode_session(self, conversation_id: int,
-                               repo_path: str | Path) -> None:
-        """Delete a stale OpenCode session mapping.
-
-        Args:
-            conversation_id (int): Snowflake ID of the channel or thread conversation.
-            repo_path (str | Path): Path to the audited repository.
-
-        Returns:
-            None: No return value.
-        """
-        self._conn.execute(
-            "DELETE FROM opencode_sessions WHERE conversation_id=? AND repo_path=?",
-            (conversation_id, self._repo_key(repo_path)),
-        )
 
     def admit_mention_job(self, source_message_id: int, conversation_id: int,
                           owner_channel_id: int, repo_path: str | Path,
@@ -1551,8 +1527,7 @@ class Store:
 
     def commit_outbox(self, batch_id: str, conversation_id: int,
                       owner_channel_id: int, repo_path: str | Path,
-                      source_message_ids: list[int], chunks: list[str],
-                      candidate_session_id: str | None) -> None:
+                      source_message_ids: list[int], chunks: list[str]) -> None:
         """Commit a generated response batch and its chunks to the outbound queue.
 
         Args:
@@ -1562,7 +1537,6 @@ class Store:
             repo_path (str | Path): Path to the audited repository.
             source_message_ids (list[int]): List of trigger message IDs included in this batch.
             chunks (list[str]): Text message chunks to deliver.
-            candidate_session_id (str | None): OpenCode session ID to persist upon completion.
 
         Returns:
             None: No return value.
@@ -1574,10 +1548,10 @@ class Store:
             self._conn.execute(
                 "INSERT INTO delivery_batches ("
                 "batch_id, conversation_id, owner_channel_id, repo_path, "
-                "status, candidate_session_id, attempt_count, available_at, "
+                "status, attempt_count, available_at, "
                 "lease_until, created_at, updated_at, last_error_class"
-                ") VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, 0, ?, ?, NULL)",
-                (batch_id, conversation_id, owner_channel_id, repo_key, candidate_session_id, now, now, now),
+                ") VALUES (?, ?, ?, ?, 'pending', 0, ?, 0, ?, ?, NULL)",
+                (batch_id, conversation_id, owner_channel_id, repo_key, now, now, now),
             )
             prefix = batch_id[:16]
             for idx, chunk in enumerate(chunks):
@@ -1616,7 +1590,7 @@ class Store:
         try:
             cursor = self._conn.execute(
                 "SELECT batch_id, conversation_id, owner_channel_id, repo_path, status, "
-                "candidate_session_id, attempt_count, available_at, lease_until, "
+                "attempt_count, available_at, lease_until, "
                 "created_at, updated_at, last_error_class FROM delivery_batches "
                 "WHERE (status = 'pending' AND available_at <= ?) "
                 "   OR (status = 'leased' AND lease_until < ?) "
@@ -1686,20 +1660,16 @@ class Store:
             (discord_message_id, now, batch_id, chunk_index),
         )
 
-    def complete_delivery_batch(self, batch_id: str, repo_path: str | Path,
-                                candidate_session_id: str | None) -> None:
+    def complete_delivery_batch(self, batch_id: str) -> None:
         """Mark a delivery batch and its mention jobs as done, scrubbing chunk bodies.
 
         Args:
             batch_id (str): Unique delivery batch identifier.
-            repo_path (str | Path): Path to the audited repository.
-            candidate_session_id (str | None): OpenCode session ID to persist, if any.
 
         Returns:
             None: No return value.
         """
         now = int(time.time())
-        repo_key = self._repo_key(repo_path)
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             batch = self._conn.execute(
@@ -1720,21 +1690,6 @@ class Store:
                 "UPDATE outbound_chunks SET body = NULL WHERE batch_id = ?",
                 (batch_id,),
             )
-            if candidate_session_id and candidate_session_id.strip():
-                row = self._conn.execute(
-                    "SELECT conversation_id FROM delivery_batches WHERE batch_id = ?",
-                    (batch_id,),
-                ).fetchone()
-                if row:
-                    conv_id = int(row[0])
-                    self._conn.execute(
-                        "INSERT INTO opencode_sessions(conversation_id, repo_path, session_id, updated_at, turns) "
-                        "VALUES(?, ?, ?, ?, 1) ON CONFLICT(conversation_id, repo_path) DO UPDATE SET "
-                        "turns = CASE WHEN opencode_sessions.session_id=excluded.session_id "
-                        "THEN opencode_sessions.turns + 1 ELSE 1 END, "
-                        "session_id = excluded.session_id, updated_at = excluded.updated_at",
-                        (conv_id, repo_key, candidate_session_id.strip(), now),
-                    )
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")

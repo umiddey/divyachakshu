@@ -1571,8 +1571,6 @@ class OIWatcher(discord.Client):
         batch_id = outbox_batch["batch_id"]
         conv_id = outbox_batch["conversation_id"]
         owner_id = outbox_batch["owner_channel_id"]
-        repo_path = outbox_batch.get("repo_path", "")
-        candidate_session_id = outbox_batch.get("candidate_session_id")
         source_message_ids = outbox_batch.get("source_message_ids", [])
         chunks = outbox_batch.get("chunks", [])
         reply_to_id = source_message_ids[-1] if source_message_ids else None
@@ -1628,11 +1626,7 @@ class OIWatcher(discord.Client):
                 return
 
         # Complete batch and scrub outbound body text
-        self._store.complete_delivery_batch(
-            batch_id,
-            repo_path=repo_path,
-            candidate_session_id=candidate_session_id,
-        )
+        self._store.complete_delivery_batch(batch_id)
 
     async def _process_conversation_jobs(
         self,
@@ -1806,12 +1800,6 @@ class OIWatcher(discord.Client):
                 # member id so only current participants reach the prompt.
                 participant_id = str(author_id) if author_id else None
                 try:
-                    session_info = self._store.get_opencode_session_info(conversation_id, repo_path)
-                    rotation_notice = ""
-                    if fresh_requested:
-                        self._store.clear_opencode_session(conversation_id, repo_path)
-                        session_info = None
-                    session_id = session_info["session_id"] if session_info else None
                     prepared = await self._prepare_external(
                         question,
                         burst_messages=burst_messages,
@@ -1841,13 +1829,12 @@ class OIWatcher(discord.Client):
                         ):
                             # An explicit public attempt with no usable evidence
                             # is answered with an honest limitation. It never
-                            # resumes a conversation session, never writes, and
-                            # never falls back silently to repository knowledge.
+                            # writes and never falls back silently to
+                            # repository knowledge.
                             reply = Reply(_limitation_reply(prepared.limitation_category), "none")
                         elif prepared.inputs.attachments:
-                            # An external-evidence run never resumes or returns a
-                            # conversation session, so nothing is written under
-                            # the conversation key and the run cannot inherit
+                            # An external-evidence run never touches the
+                            # conversation key, so it cannot inherit
                             # branch-audit context.
                             reply = await self._runner.run_external_evidence(
                                 prepared,
@@ -1864,17 +1851,14 @@ class OIWatcher(discord.Client):
                                 author_name,
                                 question,
                                 excerpt,
-                                session_id=session_id,
                                 member_id=participant_id,
                                 bot_name=bot_name,
                                 bot_id=bot_id,
                             )
                             if not reply.ok and reply.error_class in {
-                                "unknown_session",
                                 "protocol_missing_final_marker",
                                 "protocol_empty_final_answer",
                             }:
-                                self._store.clear_opencode_session(conversation_id, repo_path)
                                 if marker_retry_needed(
                                     error_class=reply.error_class,
                                     had_content=reply.had_content,
@@ -1888,7 +1872,6 @@ class OIWatcher(discord.Client):
                                     author_name,
                                     question,
                                     excerpt,
-                                    session_id=None,
                                     member_id=participant_id,
                                     bot_name=bot_name,
                                     bot_id=bot_id,
@@ -1923,12 +1906,8 @@ class OIWatcher(discord.Client):
                     response_text, has_links = filter_outbound_urls(response_text, allowed)
                 else:
                     has_links = bool(public_http_urls([response_text]))
-                if reply.ok and rotation_notice:
-                    answer_cap = max(0, reply_cap - len(rotation_notice) - 2)
-                    response_text = f"{response_text[:answer_cap].rstrip()}\n\n{rotation_notice}".strip()
                 chunks = split_message(response_text, reply_cap) if response_text else ["(no response generated)"]
                 batch_id = uuid.uuid4().hex
-                candidate_session_id = reply.session_id if reply.ok else None
 
                 # Commit outbox atomically
                 self._store.commit_outbox(
@@ -1938,7 +1917,6 @@ class OIWatcher(discord.Client):
                     repo_path=repo_path,
                     source_message_ids=source_message_ids,
                     chunks=chunks,
-                    candidate_session_id=candidate_session_id,
                 )
 
                 # Attempt immediate delivery
@@ -1991,11 +1969,7 @@ class OIWatcher(discord.Client):
                                 )
                         except Exception:
                             logger.exception("[watcher] doc upload crashed")
-                    self._store.complete_delivery_batch(
-                        batch_id,
-                        repo_path=repo_path,
-                        candidate_session_id=candidate_session_id,
-                    )
+                    self._store.complete_delivery_batch(batch_id)
                     self._enqueue_reflection(
                         batch_id=batch_id,
                         platform="discord",

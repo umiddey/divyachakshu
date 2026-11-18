@@ -133,7 +133,7 @@ async def test_disabled_gate_command_gets_limitation_without_a_repo_audit(
 
     async def forbidden_run(*args, **kwargs):
         run_calls.append((args, kwargs))
-        return Reply("repository answer", "abc123", session_id="resumed-session")
+        return Reply("repository answer", "abc123")
 
     async def forbidden_external(*args, **kwargs):
         raise AssertionError("external evidence run must not be used for a limitation")
@@ -151,7 +151,6 @@ async def test_disabled_gate_command_gets_limitation_without_a_repo_audit(
     await asyncio.sleep(0.05)
 
     assert run_calls == []
-    assert watcher._store.get_opencode_session(111, tmp_path / "repo") is None
 
 
 @pytest.mark.asyncio
@@ -196,7 +195,7 @@ async def test_ambiguous_command_gets_limitation_asking_for_a_topic(
 
     async def forbidden_run(*args, **kwargs):
         run_calls.append((args, kwargs))
-        return Reply("repository answer", "abc123", session_id="resumed-session")
+        return Reply("repository answer", "abc123")
 
     async def fake_deliver(self, channel_id, target_channel_id, chunk, nonce,
                            reply_to_message_id=None, client=None):
@@ -211,7 +210,6 @@ async def test_ambiguous_command_gets_limitation_asking_for_a_topic(
     await asyncio.sleep(0.05)
 
     assert run_calls == []
-    assert watcher._store.get_opencode_session(111, tmp_path / "repo") is None
     assert delivered
     assert "search for what" in delivered[0].lower()
     assert "!search <topic>" in delivered[0]
@@ -233,7 +231,7 @@ async def test_private_referential_command_is_refused_without_a_repo_audit(
 
     async def forbidden_run(*args, **kwargs):
         run_calls.append((args, kwargs))
-        return Reply("repository answer", "abc123", session_id="resumed-session")
+        return Reply("repository answer", "abc123")
 
     async def fake_deliver(self, channel_id, target_channel_id, chunk, nonce,
                            reply_to_message_id=None, client=None):
@@ -248,7 +246,6 @@ async def test_private_referential_command_is_refused_without_a_repo_audit(
     await asyncio.sleep(0.05)
 
     assert run_calls == []
-    assert watcher._store.get_opencode_session(111, tmp_path / "repo") is None
     assert delivered and "private" in delivered[0].lower()
 
 
@@ -279,7 +276,7 @@ async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
 
     async def forbidden_run(*args, **kwargs):
         run_calls.append((args, kwargs))
-        return Reply("repository answer", "abc123", session_id="resumed-session")
+        return Reply("repository answer", "abc123")
 
     async def forbidden_external(*args, **kwargs):
         raise AssertionError("no evidence was collected; no external run may start")
@@ -300,7 +297,6 @@ async def test_failed_retrieval_gets_limitation_without_a_repo_audit(
     await asyncio.sleep(0.05)
 
     assert run_calls == []
-    assert watcher._store.get_opencode_session(111, tmp_path / "repo") is None
     assert delivered
     assert "retrieval unavailable" in delivered[0].lower()
     assert "no_results" in delivered[0]
@@ -335,7 +331,7 @@ async def test_limitation_with_real_attachment_keeps_external_run_and_notes_it(
 
     async def forbidden_run(*args, **kwargs):
         run_calls.append((args, kwargs))
-        return Reply("repository answer", "abc123", session_id="resumed-session")
+        return Reply("repository answer", "abc123")
 
     async def fake_external(prepared, **kwargs):
         external_prepared.append(prepared)
@@ -359,7 +355,6 @@ async def test_limitation_with_real_attachment_keeps_external_run_and_notes_it(
     assert prepared.inputs.attachments
     notes = " ".join(prepared.inputs.notes).lower()
     assert "private" in notes
-    assert watcher._store.get_opencode_session(111, tmp_path / "repo") is None
 
 
 def _never_run(message):

@@ -41,20 +41,16 @@ uv pip install -e . --force-reinstall --no-deps
   Unsupported, ambiguous, or unresolved references fail honestly and never fall back to auditing the
   current checkout. Review provenance carries exact full base/head SHAs, and
   review sessions are never resumed or stored under a conversation key.
-- Conversation sessions are scoped to `(conversation_id, repo_path)` and rotate
-  before reuse at the completed-delivery cap or idle TTL. `!fresh`/`!new` and
-  `oi session forget` clear mappings only; they never widen permissions, erase
-  behavioral memory, or enable review-session reuse. Bounded current Discord
-  context may still be included. Count each successful delivery batch once;
-  failed or duplicate completions must not advance turns. CLI `--all` is scoped
-  to the required conversation, never a global forget.
+- Every call is a new OpenCode session; nothing is resumed and no
+  conversation-to-session mapping exists. Bounded current Discord context may
+  still be included. Count each successful delivery batch once; failed or
+  duplicate completions must not double-run anything.
 - Never log prompts, repository evidence, replies, model reasoning, credentials,
   or raw JSONL events. Bounded metadata only.
 - Posting is gated by the channel allowlist + per-channel hourly cap + kill
   switch (`oi pause`). Poster is the only Discord sender.
 - SQLite stores only pause/cap state, durable queue/outbox metadata, scope
-  cursors, conversation/repository OpenCode session IDs with completed-delivery
-  counts and update timestamps, and bounded, structured, versioned behavioral
+  cursors, and bounded, structured, versioned behavioral
   memory signals (scoped member profiles, expiring transient
   state, team pulse, and agent calibration). Never store prompts, repository evidence,
   reasoning, source message bodies, thread excerpts, or free-form generated text.
@@ -97,8 +93,8 @@ uv pip install -e . --force-reinstall --no-deps
 - `opencode/policy.py` — native fail-closed permission map.
 - `opencode/prompt.py` — embedded OI safety/evidence/response contract.
 - `opencode/runner.py` — bounded async OpenCode subprocess runner.
-- `watch/discord_client.py` — admission, debounce, sessions, and Poster seam.
-- `store.py` — pause, cap, and OpenCode session state.
+- `watch/discord_client.py` — admission, debounce, and Poster seam.
+- `store.py` — pause, cap, durable queue, and conversation summary state.
 - `daemon.py` — dedicated user and hardened systemd lifecycle.
 - `config.py` — strict OpenCode-only TOML validation and atomic writes.
 

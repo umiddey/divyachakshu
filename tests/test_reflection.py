@@ -470,7 +470,7 @@ async def test_behavioral_e2e_dynamics_flow(tmp_path: Path, monkeypatch) -> None
     watcher._reflection_worker_task = asyncio.create_task(watcher._reflection_worker_loop())
 
     async def fake_run(*args, **kwargs):
-        return Reply("Here is the audited code.", "sha-test", session_id="ses-1")
+        return Reply("Here is the audited code.", "sha-test")
     monkeypatch.setattr(watcher._runner, "run", fake_run)
     # Step 1: Deliver repeated messages from the same member in Scope A (channel 101)
     channel_a = FakeChannel(101)

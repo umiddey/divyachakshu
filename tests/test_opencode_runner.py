@@ -318,7 +318,6 @@ async def test_runner_uses_argv_stdin_isolated_env_and_final_text(tmp_path, monk
     )
 
     assert reply.ok is True
-    assert reply.session_id == "session-123"
     assert reply.text.startswith("UNIQUE_MARKER")
     assert "Checking the repository now." not in reply.text
     assert "Narrowing the answer down." not in reply.text
@@ -397,8 +396,8 @@ async def test_unframed_planning_is_never_delivered(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("behavior", "error_class"), [
     ("malformed", "malformed_jsonl"),
-    ("unknown", "unknown_session"),
-    ("cli_missing_session", "unknown_session"),
+    ("unknown", "opencode_error"),
+    ("cli_missing_session", "nonzero_exit"),
     ("empty", "empty_response"),
     ("large_line", "json_line_limit"),
     # Native v2 completion gate: the four bounded proof failures.
@@ -635,8 +634,8 @@ def test_select_final_text_in_stream_error_takes_precedence():
 
 def test_error_class_string_payloads_are_bounded():
     """Raw-string error payloads contribute only the bounded classes."""
-    assert _error_class({"error": "Session not found: ses_deadbeef"}) == "unknown_session"
-    assert _error_class({"error": "UNKNOWN_SESSION token replay"}) == "unknown_session"
+    assert _error_class({"error": "Session not found: ses_deadbeef"}) == "opencode_error"
+    assert _error_class({"error": "UNKNOWN_SESSION token replay"}) == "opencode_error"
     assert _error_class({"error": _HOSTILE_PAYLOAD}) == "opencode_error"
     assert _error_class({"error": ""}) == "opencode_error"
     assert _error_class({"data": 42}) == "opencode_error"
@@ -1072,7 +1071,6 @@ async def test_runner_mr_review_audits_snapshots_with_mr_provenance(tmp_path, mo
     )
 
     assert reply.ok is True
-    assert reply.session_id is None  # review sessions are never resumed or stored
     assert reply.sha == f"MR !188 base {base_sha} head {head_sha}"
     assert reply.text.startswith("UNIQUE_MARKER")
     assert "Checking the repository now." not in reply.text  # narration dropped
@@ -1116,7 +1114,6 @@ async def test_runner_pr_review_reports_github_provenance(tmp_path, monkeypatch)
     )
 
     assert reply.ok is True
-    assert reply.session_id is None
     assert reply.sha == f"PR #188 base {base_sha} head {head_sha}"
     stdin = json.loads(trace_path.read_text(encoding="utf-8"))["stdin"]
     assert "PR #188" in stdin
@@ -1139,7 +1136,6 @@ async def test_runner_ambiguous_mr_ref_fails_without_auditing(tmp_path, monkeypa
 
     assert reply.ok is False
     assert reply.error_class == "review_ref_ambiguous"
-    assert reply.session_id is None
     assert "repository" in reply.text or "URL" in reply.text
     assert not trace_path.exists()  # the fake OpenCode binary was never invoked
     assert _reviews_glob() == []
@@ -1161,7 +1157,6 @@ async def test_runner_unavailable_mr_ref_fails_honestly(tmp_path, monkeypatch):
 
     assert reply.ok is False
     assert reply.error_class == "review_ref_unavailable"
-    assert reply.session_id is None
     assert "repository" in reply.text or "URL" in reply.text
     assert not trace_path.exists()
     assert _reviews_glob() == []
@@ -1201,7 +1196,6 @@ async def test_runner_snapshot_failure_returns_bounded_class(tmp_path, monkeypat
 
     assert reply.ok is False
     assert reply.error_class == "review_base_unavailable"
-    assert reply.session_id is None
     assert not trace_path.exists()
     assert _reviews_glob() == []
     assert worktree_fingerprint(clone) == fingerprint

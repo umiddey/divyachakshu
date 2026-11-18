@@ -269,8 +269,7 @@ def _error_class(event: dict[str, Any]) -> str:
     a candidate is used only when it is a string fully matching
     ``[A-Za-z0-9_.-]{1,64}``; otherwise the next candidate is tried and, when
     none validates, the payload collapses to ``opencode_error``.
-    Plain-string payloads are unbounded harness diagnostics: the only signal
-    kept is the ``session`` substring (``unknown_session``); everything else
+    Plain-string payloads are unbounded harness diagnostics: everything
     collapses to the bounded constant ``opencode_error`` so no raw harness
     text can reach a reply.
     """
@@ -279,10 +278,6 @@ def _error_class(event: dict[str, Any]) -> str:
         for candidate in (err.get("name"), err.get("type")):
             if isinstance(candidate, str) and _ERROR_CLASS_PATTERN.fullmatch(candidate):
                 return candidate
-        return "opencode_error"
-    if isinstance(err, str):
-        if "session" in err.lower():
-            return "unknown_session"
         return "opencode_error"
     return "opencode_error"
 
@@ -311,7 +306,7 @@ def _error_class(event: dict[str, Any]) -> str:
 # steps that ended to run tools (their text is narration) and ``stop`` for the
 # successful terminal answer. Non-successful terminal endings (``length``,
 # ``content-filter``, ``error``, ...) are possible per the public schema. A
-# resumed ``--session`` stream contains only the new turn, so each run yields
+# Each run streams only its own new turn, so each run yields
 # at most one ``stop``-completed assistant message.
 _KNOWN_EVENT_TYPES = frozenset({
     "step_start", "step_finish", "text", "tool_use", "reasoning", "error",
@@ -473,7 +468,6 @@ def _failure(
         text=failure_text(error_class, code_question=code_question),
         sha=sha,
         ok=False,
-        session_id=None,
         error_class=error_class,
         had_content=had_content,
     )
@@ -500,7 +494,7 @@ def _review_failure(error_class: str, sha: str = "none") -> Reply:
             f"I couldn't verify that merge request ({error_class}) "
             "and I'm not going to guess."
         )
-    return Reply(text=text, sha=sha, ok=False, session_id=None, error_class=error_class)
+    return Reply(text=text, sha=sha, ok=False, error_class=error_class)
 
 
 def _review_label(provider: str, number: int) -> str:
@@ -806,7 +800,6 @@ class OpenCodeRunner:
         author: str,
         question: str,
         excerpt: str,
-        session_id: str | None = None,
         member_id: str | None = None,
         bot_name: str = "",
         bot_id: int | None = None,
@@ -822,8 +815,6 @@ class OpenCodeRunner:
             author: Discord display name.
             question: Latest user question.
             excerpt: Bounded Discord conversation excerpt.
-            session_id: Optional OpenCode session to resume (ignored for
-                MR/PR reviews, which never share branch-audit context).
             member_id: Optional author member id; when known, memory rendering
                 is restricted to current participants (plan Phase 3.6).
             bot_name: Discord display name the agent posts under; grounds the
@@ -871,7 +862,6 @@ class OpenCodeRunner:
                 author,
                 question,
                 excerpt,
-                session_id,
                 member_id,
                 bot_name=bot_name,
                 bot_id=bot_id,
@@ -1325,7 +1315,6 @@ class OpenCodeRunner:
                 additional_roots=additional_roots,
                 prompt_str=prompt_str,
                 prompt=prompt,
-                session_id=None,
                 write_mode="read-only",
                 write_dirs=[],
                 files=attachment_files,
@@ -1357,7 +1346,6 @@ class OpenCodeRunner:
                 text=_bounded_text(text, self._cfg.max_reply_chars),
                 sha="none",
                 ok=True,
-                session_id=None,
             )
         finally:
             # Guaranteed cleanup on success, failure, timeout, and cancellation:
@@ -1373,7 +1361,6 @@ class OpenCodeRunner:
         author: str,
         question: str,
         excerpt: str,
-        session_id: str | None,
         member_id: str | None = None,
         bot_name: str = "",
         bot_id: int | None = None,
@@ -1483,7 +1470,6 @@ class OpenCodeRunner:
                 additional_roots=additional_roots,
                 prompt_str=prompt_str,
                 prompt=prompt,
-                session_id=session_id,
                 write_mode=write_mode,
                 write_dirs=write_dirs,
             )
@@ -1542,7 +1528,6 @@ class OpenCodeRunner:
             text=_bounded_text(text, self._cfg.max_reply_chars),
             sha=final_combined_sha,
             ok=True,
-            session_id=returned_session,
             attachments=attachments,
         )
 
@@ -1554,7 +1539,6 @@ class OpenCodeRunner:
         additional_roots: list[Path],
         prompt_str: str,
         prompt: str,
-        session_id: str | None,
         write_mode: str = "read-only",
         write_dirs: list[str] | tuple[str, ...] | None = None,
         files: list[Path] | None = None,
@@ -1580,7 +1564,6 @@ class OpenCodeRunner:
             additional_roots: Auxiliary roots authorized read-only.
             prompt_str: Embedded system prompt.
             prompt: Bounded user prompt written to stdin.
-            session_id: Optional OpenCode session to resume.
             write_mode: ``"read-only"`` or ``"docs-only"``.
             write_dirs: Optional repo-relative scopes for doc writes.
             files: Optional image paths attached as real native attachments.
@@ -1608,10 +1591,7 @@ class OpenCodeRunner:
         )
         argv = [
             binary,
-            *build_argv(
-                self._cfg.opencode_model, "oi",
-                session_id=session_id, files=files,
-            ),
+            *build_argv(self._cfg.opencode_model, "oi", files=files),
         ]
         if disposable is not None:
             environment = disposable.environment()
@@ -1679,13 +1659,7 @@ class OpenCodeRunner:
         if process is None:
             error_class = error_class or "process_error"
         elif process.returncode not in (0, None):
-            stderr_lower = stderr_sample.lower()
-            if "session" in stderr_lower and any(
-                w in stderr_lower for w in ("not found", "unknown", "deleted", "invalid")
-            ):
-                error_class = "unknown_session"
-            else:
-                error_class = error_class or "nonzero_exit"
+            error_class = error_class or "nonzero_exit"
         completion = NativeCompletion(False, "empty_response")
         if not events:
             error_class = error_class or "empty_response"
@@ -1834,7 +1808,6 @@ class OpenCodeRunner:
                         additional_roots=[snapshot.base_dir],
                         prompt_str=prompt_str,
                         prompt=prompt,
-                        session_id=None,
                         files=files,
                         disposable=disposable,
                         controller_snapshots=True,
@@ -1867,7 +1840,6 @@ class OpenCodeRunner:
                 text=_bounded_text(text, self._cfg.max_reply_chars),
                 sha=provenance,
                 ok=True,
-                session_id=None,
             )
         finally:
             # Guaranteed cleanup on success, failure, timeout, and cancellation.

@@ -7,7 +7,6 @@ import logging
 import os
 import stat
 import sys
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1158,7 +1157,7 @@ def config_secret(
 # Session Subcommands
 # ==============================================================================
 
-session_app = typer.Typer(help="Inspect and forget OpenCode session mappings.")
+session_app = typer.Typer(help="Inspect and forget conversation summaries.")
 app.add_typer(session_app, name="session")
 
 
@@ -1167,7 +1166,7 @@ def session_list(
     conversation: int | None = typer.Option(None, "--conversation", min=1),
     config: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c"),
 ) -> None:
-    """Display session metadata, optionally limited to one conversation.
+    """Display summary metadata, optionally limited to one conversation.
 
     Args:
         conversation: Positive Discord channel or thread ID to filter by.
@@ -1176,25 +1175,22 @@ def session_list(
     cfg = _load_or_die(config)
     store = Store(Path(cfg.db_path).expanduser())
     try:
-        sessions = store.list_opencode_sessions(conversation)
-        if not sessions:
-            console.print("No OpenCode session mappings found.")
+        summaries = store.list_summaries(conversation)
+        if not summaries:
+            console.print("No conversation summaries stored.")
             return
-        table = Table(title="OpenCode Sessions")
+        table = Table(title="Conversation Summaries")
         table.add_column("Conversation", style="cyan", no_wrap=True)
-        table.add_column("Repo", overflow="fold")
-        table.add_column("Turns", justify="right")
+        table.add_column("Chars", justify="right")
+        table.add_column("Last summarized message", justify="right")
         table.add_column("Updated (UTC)")
-        table.add_column("Age (seconds)", justify="right")
-        now = time.time()
-        for session in sessions:
-            updated_at = float(session["updated_at"])
+        for summary in summaries:
+            updated_at = float(summary["updated_at"])
             table.add_row(
-                str(session["conversation_id"]),
-                str(session["repo_path"]),
-                str(session["turns"]),
+                str(summary["conversation_id"]),
+                str(len(summary["summary_json"])),
+                str(summary["last_summarized_message_id"]),
                 datetime.fromtimestamp(updated_at, UTC).isoformat(timespec="seconds"),
-                str(max(0, int(now - updated_at))),
             )
         console.print(table)
     finally:
@@ -1204,26 +1200,21 @@ def session_list(
 @session_app.command("forget")
 def session_forget(
     conversation: int = typer.Option(..., "--conversation", min=1),
-    repo: Path | None = typer.Option(None, "--repo", help="Repository mapping to forget"),
-    all_repos: bool = typer.Option(False, "--all", help="Forget all repos in this conversation"),
     config: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c"),
 ) -> None:
-    """Forget scoped session mappings so the next mention starts fresh.
+    """Forget one conversation's rolling summary so it rebuilds from scratch.
 
     Args:
         conversation: Required positive Discord channel or thread ID.
-        repo: One repository path; mutually exclusive with all_repos.
-        all_repos: Forget every repo only within the given conversation.
         config: Configuration containing the local state database path.
     """
-    if (repo is not None) == all_repos:
-        console.print("[red]must specify exactly one of --repo or --all[/red]")
-        raise typer.Exit(1)
     cfg = _load_or_die(config)
     store = Store(Path(cfg.db_path).expanduser())
     try:
-        count = store.forget_opencode_sessions(conversation, repo)
-        console.print(f"[green]forgot {count} session mapping(s) for conversation {conversation}[/green]")
+        if store.forget_summary(conversation):
+            console.print(f"[green]forgot summary for conversation {conversation}[/green]")
+        else:
+            console.print(f"no summary stored for conversation {conversation}")
     finally:
         store.close()
 

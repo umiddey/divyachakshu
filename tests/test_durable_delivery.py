@@ -227,7 +227,7 @@ async def test_admission_writes_to_sqlite_before_processing(tmp_path: Path, monk
     async def fake_run(*args, **kwargs):
         runner_entered.set()
         await runner_release.wait()
-        return Reply("audit result", "sha123", session_id="sess-1")
+        return Reply("audit result", "sha123")
 
     async def fake_deliver(self, *args, **kwargs):
         return DeliveryResult(ok=True, discord_message_id=555)
@@ -278,8 +278,8 @@ async def test_downtime_message_recovery_on_on_ready(tmp_path: Path, monkeypatch
 
     deliveries = []
 
-    async def fake_run(target, author, question, excerpt, session_id=None, member_id=None, bot_name="", bot_id=None):
-        return Reply("recovered reply", "sha123", session_id="sess-recovered")
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+        return Reply("recovered reply", "sha123")
 
     async def fake_deliver(self, channel_id, target_channel_id, chunk, nonce, reply_to_message_id=None, client=None):
         deliveries.append((channel_id, chunk, reply_to_message_id))
@@ -298,7 +298,6 @@ async def test_downtime_message_recovery_on_on_ready(tmp_path: Path, monkeypatch
     assert deliveries[0][0] == 111
     assert deliveries[0][1] == "recovered reply"
     assert deliveries[0][2] == 102
-    assert watcher._store.get_opencode_session(111, tmp_path / "repo") == "sess-recovered"
 
 
 @pytest.mark.asyncio
@@ -322,9 +321,9 @@ async def test_active_and_archived_thread_recovery(tmp_path: Path, monkeypatch) 
     watcher._test_guilds = [guild]
     runs = []
 
-    async def fake_run(target, author, question, excerpt, session_id=None, member_id=None, bot_name="", bot_id=None):
-        runs.append((question, session_id))
-        return Reply(f"ans for {question}", "sha", session_id="thread-sess")
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
+        runs.append(question)
+        return Reply(f"ans for {question}", "sha")
 
     async def fake_deliver(self, channel_id, target_channel_id, chunk, nonce, reply_to_message_id=None, client=None):
         return DeliveryResult(ok=True, discord_message_id=777)
@@ -354,9 +353,9 @@ async def test_burst_coalescing_preserves_all_source_message_ids(tmp_path: Path,
 
     questions_seen = []
 
-    async def fake_run(target, author, question, excerpt, session_id=None, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
         questions_seen.append(question)
-        return Reply("combined answer", "sha123", session_id="burst-session")
+        return Reply("combined answer", "sha123")
 
     async def fake_deliver(self, channel_id, target_channel_id, chunk, nonce, reply_to_message_id=None, client=None):
         return DeliveryResult(ok=True, discord_message_id=888)
@@ -402,7 +401,6 @@ async def test_resume_pending_outbox_without_rerunning_opencode(tmp_path: Path, 
         repo_path=repo_path,
         source_message_ids=[701],
         chunks=["chunk one", "chunk two"],
-        candidate_session_id="resumed-session-id",
     )
 
     delivered_chunks = []
@@ -437,8 +435,6 @@ async def test_resume_pending_outbox_without_rerunning_opencode(tmp_path: Path, 
     ).fetchall()
     assert all(b[0] is None for b in bodies)
 
-    assert watcher._store.get_opencode_session(111, repo_path) == "resumed-session-id"
-
 
 @pytest.mark.asyncio
 async def test_lease_expiry_recovery_after_simulated_crash(tmp_path: Path, monkeypatch) -> None:
@@ -464,9 +460,9 @@ async def test_lease_expiry_recovery_after_simulated_crash(tmp_path: Path, monke
 
     runs = []
 
-    async def fake_run(target, author, question, excerpt, session_id=None, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
         runs.append(question)
-        return Reply("recovered from crash", "sha999", session_id="crash-sess")
+        return Reply("recovered from crash", "sha999")
 
     async def fake_deliver(self, *args, **kwargs):
         return DeliveryResult(ok=True, discord_message_id=999)
@@ -499,7 +495,6 @@ async def test_partial_outbox_chunk_resume_deduplication(tmp_path: Path, monkeyp
         repo_path=repo_path,
         source_message_ids=[901],
         chunks=["part 1 sent", "part 2 pending"],
-        candidate_session_id="partial-sess",
     )
     # Mark chunk 0 as already delivered
     watcher._store.record_chunk_delivery(batch_id, 0, discord_message_id=7777)
@@ -636,12 +631,12 @@ async def test_concurrent_conversations_burst_parallelism(
     started = []
     release = asyncio.Event()
 
-    async def fake_run(target, author, question, excerpt, session_id=None, member_id=None, bot_name="", bot_id=None):
+    async def fake_run(target, author, question, excerpt, member_id=None, bot_name="", bot_id=None):
         started.append(question)
         if len(started) == 2:
             release.set()
         await release.wait()
-        return Reply("answer", "sha", session_id="test-session")
+        return Reply("answer", "sha")
 
     monkeypatch.setattr(watcher._runner, "run", fake_run)
 
@@ -772,7 +767,7 @@ async def test_failed_delivery_queues_no_reflection(tmp_path: Path, monkeypatch)
     watcher._channel_cache[111] = channel
 
     async def fake_run(*args, **kwargs):
-        return Reply("answer", "sha", session_id="sess-fail")
+        return Reply("answer", "sha")
 
     async def failing_deliver(self, *args, **kwargs):
         return DeliveryResult(ok=False, error_class="forbidden", status_code=403)
@@ -801,7 +796,6 @@ async def test_recovered_outbox_delivery_queues_no_reflection(tmp_path: Path, mo
         repo_path=repo_path,
         source_message_ids=[1501],
         chunks=["recovered chunk"],
-        candidate_session_id=None,
     )
 
     async def fake_deliver(self, *args, **kwargs):
@@ -966,7 +960,7 @@ async def test_guild_watch_reflection_stores_under_guild_scope(tmp_path: Path, m
     watcher._channel_cache[777] = channel
 
     async def fake_run(*args, **kwargs):
-        return Reply("guild answer", "sha-g", session_id="sess-g")
+        return Reply("guild answer", "sha-g")
 
     async def fake_deliver(self, *args, **kwargs):
         return DeliveryResult(ok=True, discord_message_id=606)
@@ -1201,7 +1195,6 @@ async def test_final_only_reply_reaches_outbox_and_discord(tmp_path: Path, monke
         await asyncio.sleep(0.05)
     await watcher.close()
 
-    assert store.get_opencode_session(111, repo) is not None  # the audit itself succeeded
     # Only the final answer was delivered, in order, split purely for transport.
     assert len(delivered) == 2
     for chunk in delivered:
@@ -1271,8 +1264,6 @@ async def test_mr_review_final_only_through_outbox_and_discord(tmp_path: Path, m
     # Exactly one chunk: the bounded final review text.
     assert delivered == [expected_text]
     assert bodies_seen_at_delivery == [[expected_text]]
-    # Review sessions are never stored, so nothing can be resumed.
-    assert store.get_opencode_session(111, clone) is None
     # Outbox scrubbed after confirmation; snapshots gone; worktree untouched.
     assert all(body is None for _b, _i, body in _outbox_rows(store))
     assert _reviews_glob() == []

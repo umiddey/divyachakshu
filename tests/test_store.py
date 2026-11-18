@@ -1,4 +1,4 @@
-"""Tests for retained SQLite safety state, OpenCode sessions, and durable delivery queues."""
+"""Tests for retained SQLite safety state, conversation summaries, and durable delivery queues."""
 
 import hashlib
 import sqlite3
@@ -6,59 +6,87 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from oi_agent.store import Store
 
 
-def test_session_legacy_migration_and_delivery_counting(tmp_path):
-    """Legacy sessions survive migration and completed batches count exactly once."""
+def test_legacy_session_state_is_dropped_on_open(tmp_path):
+    """Opening an old DB drops resumed-session state and the candidate column."""
     db = tmp_path / "state.db"
     repo = tmp_path / "repo"
     conn = sqlite3.connect(db)
     conn.execute(
         "CREATE TABLE opencode_sessions (conversation_id INTEGER, repo_path TEXT, "
-        "session_id TEXT, updated_at INTEGER, PRIMARY KEY(conversation_id, repo_path))"
+        "session_id TEXT, updated_at INTEGER, turns INTEGER, PRIMARY KEY(conversation_id, repo_path))"
     )
-    conn.execute("INSERT INTO opencode_sessions VALUES (1, ?, 'old', 100)", (str(repo),))
+    conn.execute("INSERT INTO opencode_sessions VALUES (1, ?, 'old', 100, 3)", (str(repo),))
+    conn.execute(
+        "CREATE TABLE delivery_batches (batch_id TEXT PRIMARY KEY, conversation_id INTEGER NOT NULL, "
+        "owner_channel_id INTEGER NOT NULL, repo_path TEXT NOT NULL, status TEXT NOT NULL, "
+        "candidate_session_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, "
+        "lease_until INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+        "last_error_class TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO delivery_batches (batch_id, conversation_id, owner_channel_id, repo_path, status, "
+        "candidate_session_id, available_at, created_at, updated_at) "
+        "VALUES ('legacy-batch', 1, 1, ?, 'done', 'legacy-session', 1, 1, 1)",
+        (str(repo),),
+    )
     conn.commit()
     conn.close()
     store = Store(db)
-    assert store.get_opencode_session(1, repo) == "old"
-    assert store.get_opencode_session_info(1, repo)["turns"] == 0
-    for index, session, turns in [(1, "old", 1), (2, "old", 2), (3, "replacement", 1)]:
-        batch = f"session-count-{index}"
-        store.admit_mention_job(index, 1, 1, repo)
-        store.commit_outbox(batch, 1, 1, repo, [index], ["answer"], session)
-        assert store.get_opencode_session_info(1, repo)["turns"] == (0 if index == 1 else index - 1)
-        store.record_chunk_delivery(batch, 0, 100 + index)
-        store.complete_delivery_batch(batch, repo, session)
-        store.complete_delivery_batch(batch, repo, session)
-        assert store.get_opencode_session_info(1, repo)["turns"] == turns
-    store.set_opencode_session(1, repo, "replacement")
-    assert store.get_opencode_session_info(1, repo)["turns"] == 1
-    store.close()
-    store = Store(db)
-    assert store.get_opencode_session_info(1, repo)["turns"] == 1
-    store.forget_opencode_sessions(1)
-    store.complete_delivery_batch("session-count-3", repo, "replacement")
-    assert store.get_opencode_session_info(1, repo) is None
-    store.close()
+    try:
+        tables = {
+            row[0] for row in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(delivery_batches)")}
+        assert "opencode_sessions" not in tables
+        assert "candidate_session_id" not in columns
+        # Double completion stays idempotent without any session counting.
+        store.admit_mention_job(1, 1, 1, repo)
+        store.commit_outbox("batch-1", 1, 1, repo, [1], ["answer"])
+        store.record_chunk_delivery("batch-1", 0, 101)
+        store.complete_delivery_batch("batch-1")
+        store.complete_delivery_batch("batch-1")
+        status = store._conn.execute(
+            "SELECT status FROM delivery_batches WHERE batch_id='batch-1'"
+        ).fetchone()[0]
+        bodies = store._conn.execute(
+            "SELECT body FROM outbound_chunks WHERE batch_id='batch-1'"
+        ).fetchall()
+        assert status == "done"
+        assert all(body[0] is None for body in bodies)
+    finally:
+        store.close()
 
 
-def test_session_prune_exact_idle_boundary_and_disabled_ttl(tmp_path, monkeypatch):
-    """TTL pruning removes only expired sessions and zero preserves every mapping."""
-    monkeypatch.setattr("oi_agent.store.time.time", lambda: 1_000_000)
+def test_summary_store_roundtrip_cap_and_scope(tmp_path):
+    """Summaries are keyed per conversation and oversized JSON is refused."""
     store = Store(tmp_path / "state.db")
-    repo = tmp_path / "repo"
-    store.set_opencode_session(1, repo, "expired")
-    store.set_opencode_session(2, repo, "live")
-    store._conn.execute("UPDATE opencode_sessions SET updated_at=? WHERE conversation_id=1", (1_000_000 - 86400,))
-    store._conn.execute("UPDATE opencode_sessions SET updated_at=? WHERE conversation_id=2", (1_000_001 - 86400,))
-    assert store.prune_expired_sessions(0) == 0
-    assert store.prune_expired_sessions(1) == 1
-    assert store.get_opencode_session(1, repo) is None
-    assert store.get_opencode_session(2, repo) == "live"
-    assert store.prune_expired_sessions(1) == 0
-    store.close()
+    try:
+        store.set_summary(111, '{"v":1,"items":[]}', 10, max_chars=1500)
+        store.set_summary(222, '{"v":1,"items":[]}', 20, max_chars=1500)
+        assert store.get_summary(111) == '{"v":1,"items":[]}'
+        rows = store.list_summaries()
+        assert [row["conversation_id"] for row in rows] == [111, 222]
+        assert rows[0]["last_summarized_message_id"] == 10
+        scoped = store.list_summaries(222)
+        assert len(scoped) == 1 and scoped[0]["last_summarized_message_id"] == 20
+        store.set_summary(111, '{"v":1,"items":[{"topic":"deploy"}]}', 11, max_chars=1500)
+        assert store.get_summary(111) == '{"v":1,"items":[{"topic":"deploy"}]}'
+        with pytest.raises(ValueError):
+            store.set_summary(111, "x" * 3001, 12, max_chars=1500)
+        assert store.get_summary(111) == '{"v":1,"items":[{"topic":"deploy"}]}'
+        assert store.forget_summary(111) is True
+        assert store.forget_summary(111) is False
+        assert store.get_summary(111) is None
+        assert store.get_summary(222) == '{"v":1,"items":[]}'
+    finally:
+        store.close()
 
 
 def test_existing_profile_schema_gets_additive_created_at_migration(tmp_path):
@@ -119,22 +147,6 @@ def test_stale_posts_are_pruned(tmp_path):
     assert store.posts_in_last_hour(111) == 1
 
 
-def test_opencode_sessions_are_keyed_by_conversation_and_repo(tmp_path):
-    """Parent and sibling conversations cannot share session mappings."""
-    store = Store(tmp_path / "state.db")
-    repo = tmp_path / "repo"
-    other = tmp_path / "other"
-    store.set_opencode_session(111, repo, "session-parent")
-    store.set_opencode_session(222, repo, "session-thread")
-    store.set_opencode_session(111, other, "session-other-repo")
-
-    assert store.get_opencode_session(111, repo) == "session-parent"
-    assert store.get_opencode_session(222, repo) == "session-thread"
-    assert store.get_opencode_session(111, other) == "session-other-repo"
-    store.clear_opencode_session(111, repo)
-    assert store.get_opencode_session(111, repo) is None
-
-
 def test_legacy_memory_and_message_tables_are_removed(tmp_path):
     """Opening an old state DB migrates away obsolete transcript storage."""
     db = tmp_path / "state.db"
@@ -154,7 +166,8 @@ def test_legacy_memory_and_message_tables_are_removed(tmp_path):
     conn.close()
     assert "memory" not in tables
     assert "messages" not in tables
-    assert "opencode_sessions" in tables
+    assert "opencode_sessions" not in tables
+    assert "conversation_summaries" in tables
     assert "discord_scopes" in tables
     assert "mention_jobs" in tables
     assert "delivery_batches" in tables
@@ -276,7 +289,7 @@ def test_claim_next_conversation_jobs_and_lease_recovery(tmp_path):
 
 
 def test_outbox_lifecycle_and_body_scrubbing(tmp_path):
-    """Outbox commit, chunk acknowledgement, session saving, and body scrubbing on completion."""
+    """Outbox commit, chunk acknowledgement, and body scrubbing on completion."""
     store = Store(tmp_path / "state.db")
     repo = tmp_path / "repo"
 
@@ -295,7 +308,6 @@ def test_outbox_lifecycle_and_body_scrubbing(tmp_path):
         repo_path=repo,
         source_message_ids=[101],
         chunks=chunks,
-        candidate_session_id="session-candidate-999",
     )
 
     # Mention job should be bound to the batch
@@ -324,7 +336,7 @@ def test_outbox_lifecycle_and_body_scrubbing(tmp_path):
     store.record_chunk_delivery(batch_id=batch_id, chunk_index=1, discord_message_id=90002)
 
     # Complete the delivery batch
-    store.complete_delivery_batch(batch_id=batch_id, repo_path=repo, candidate_session_id="session-candidate-999")
+    store.complete_delivery_batch(batch_id=batch_id)
 
     # Verify batch, jobs, and body scrubbing
     conn = sqlite3.connect(tmp_path / "state.db")
@@ -345,10 +357,6 @@ def test_outbox_lifecycle_and_body_scrubbing(tmp_path):
     assert chunk_rows[0][4] == 90001
     assert chunk_rows[1][2] is None
     assert chunk_rows[1][4] == 90002
-
-    # Verify OpenCode session was committed
-    assert store.get_opencode_session(50, repo) == "session-candidate-999"
-
 
 def test_job_failure_retry_and_dead_letter(tmp_path):
     """Job failures schedule retries and transition to dead-letter status on max attempts or permanent error."""
@@ -419,7 +427,6 @@ def test_batch_failure_and_dead_letter(tmp_path):
         repo_path=repo,
         source_message_ids=[301],
         chunks=["chunk to fail"],
-        candidate_session_id=None,
     )
 
     # Transient failure
@@ -460,9 +467,8 @@ def test_purge_completed_records(tmp_path):
         repo_path=repo,
         source_message_ids=[401],
         chunks=["chunk to purge"],
-        candidate_session_id=None,
     )
-    store.complete_delivery_batch(batch_id=batch_id, repo_path=repo, candidate_session_id=None)
+    store.complete_delivery_batch(batch_id=batch_id)
 
     # Backdate the updated_at timestamp
     conn = sqlite3.connect(tmp_path / "state.db")
@@ -574,7 +580,6 @@ def test_job_and_batch_deferral_does_not_burn_attempts(tmp_path):
         repo_path=repo,
         source_message_ids=[501],
         chunks=["deferred chunk"],
-        candidate_session_id=None,
     )
 
     for _ in range(10):
@@ -1273,7 +1278,7 @@ def test_purge_legacy_profiles(tmp_path):
 
 
 def test_operational_state_survives_memory_migration(tmp_path):
-    """Queue, outbox, session, and cursor state survive legacy migration and purge."""
+    """Queue, outbox, summary, and cursor state survive legacy migration and purge."""
     repo = tmp_path / "repo"
     store = Store(tmp_path / "state.db")
     _seed_legacy_tables(
@@ -1289,9 +1294,8 @@ def test_operational_state_survives_memory_migration(tmp_path):
         repo_path=repo,
         source_message_ids=[101],
         chunks=["chunk"],
-        candidate_session_id=None,
     )
-    store.set_opencode_session(50, repo, "session-keep")
+    store.set_summary(50, '{"v":1,"items":[]}', 101, max_chars=1500)
     store.update_scope_cursor(
         "channel-1", owner_channel_id=50, last_seen_message_id=900
     )
@@ -1299,7 +1303,7 @@ def test_operational_state_survives_memory_migration(tmp_path):
     assert store.migrate_legacy_profiles("target_scope") == 1
     assert store.purge_legacy_profiles() == 0  # legacy tables already dropped
 
-    assert store.get_opencode_session(50, repo) == "session-keep"
+    assert store.get_summary(50) == '{"v":1,"items":[]}'
     assert store.get_scope_cursor("channel-1") == 900
     conn = store._conn
     assert conn.execute("SELECT COUNT(*) FROM mention_jobs").fetchone()[0] == 1
