@@ -149,6 +149,11 @@ def fake_opencode_on_path(tmp_path, monkeypatch):
     )
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    # A test that falls back to the default ``~/.local/state/oi/state.db`` must
+    # never reach the operator's live database (init/watch-add open the store).
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.fixture

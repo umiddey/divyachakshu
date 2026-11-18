@@ -640,7 +640,14 @@ def test_cli_watch_add_remove_and_show_multi_repo(tmp_path):
     repo2.mkdir()
     subprocess.run(["git", "-C", str(repo2), "init", "-q"], check=True)
 
-    save_config(Config(opencode_binary="/bin/true", watches=[WatchTarget(111, str(repo1))]), path=cfg_file)
+    save_config(
+        Config(
+            opencode_binary="/bin/true",
+            db_path=str(tmp_path / "state.db"),
+            watches=[WatchTarget(111, str(repo1))],
+        ),
+        path=cfg_file,
+    )
 
     runner = CliRunner()
 
