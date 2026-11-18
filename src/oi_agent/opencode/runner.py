@@ -814,7 +814,7 @@ class OpenCodeRunner:
         member_id: str | None = None,
         bot_name: str = "",
         bot_id: int | None = None,
-        open_channel: bool = False,
+        open_channel_prompt: str | None = None,
     ) -> Reply:
         """Refresh, snapshot, execute, and provenance-stamp one or more repository audits.
 
@@ -832,9 +832,10 @@ class OpenCodeRunner:
             bot_name: Discord display name the agent posts under; grounds the
                 prompt identity block.
             bot_id: Stable Discord user id of the agent's bot account.
-            open_channel: True for open-channel runs; renders the
-                reply-or-stay-silent contract in the prompt. Never applied to
-                review runs.
+            open_channel_prompt: Mode for open-channel runs ("none" or
+                "personality"); None for every other run. Open-channel runs
+                get the minimal prompt and always run read-only. Never applied
+                to review runs.
 
         Returns:
             Bounded Reply. OpenCode/process failures have ``ok=False``.
@@ -883,7 +884,7 @@ class OpenCodeRunner:
                 evidence=evidence,
                 code_question=code_question,
                 format_reminder=reminder,
-                open_channel=open_channel,
+                open_channel_prompt=open_channel_prompt,
             )
     async def run_raw_prompt(
         self,
@@ -1247,7 +1248,7 @@ class OpenCodeRunner:
         excerpt: str,
         bot_name: str = "",
         bot_id: int | None = None,
-        open_channel: bool = False,
+        open_channel_prompt: str | None = None,
     ) -> Reply:
         """Answer an external-evidence question in a disposable read-only run.
 
@@ -1280,8 +1281,8 @@ class OpenCodeRunner:
             excerpt: Bounded Discord conversation excerpt.
             bot_name: Discord display name the agent posts under.
             bot_id: Stable Discord user id of the bot account.
-            open_channel: True for open-channel runs; renders the
-                reply-or-stay-silent contract in the prompt. Never applied to
+            open_channel_prompt: Mode for open-channel runs ("none" or
+                "personality"); None for every other run. Never applied to
                 review runs.
 
         Returns:
@@ -1350,7 +1351,7 @@ class OpenCodeRunner:
             write_mode="read-only",
             write_dirs=[],
             external_inputs=True,
-            open_channel=open_channel,
+            open_channel_prompt=open_channel_prompt,
         )
 
         disposable = DisposableNativeRoot()
@@ -1422,7 +1423,7 @@ class OpenCodeRunner:
         evidence: PreparedExternal | None = None,
         code_question: bool = True,
         format_reminder: str | None = None,
-        open_channel: bool = False,
+        open_channel_prompt: str | None = None,
     ) -> Reply:
         """Execute one audit while holding repository serialization locks."""
         all_roots = [root, *additional_roots]
@@ -1484,7 +1485,7 @@ class OpenCodeRunner:
             return _failure(combined_sha_prompt, "prompt_too_large")
         snapshot = None
         scope_id = scope_id_for_target(target)
-        if self._store is not None and scope_id:
+        if open_channel_prompt is None and self._store is not None and scope_id:
             try:
                 snapshot = self._store.memory_snapshot(
                     "discord",
@@ -1502,6 +1503,11 @@ class OpenCodeRunner:
 
         write_mode = getattr(self._cfg, "write_mode", "read-only")
         write_dirs = list(getattr(self._cfg, "write_dirs", []) or [])
+        if open_channel_prompt is not None:
+            # D2: open-channel runs never write. These locals feed the prompt,
+            # the execution policy, and doc attachments.
+            write_mode = "read-only"
+            write_dirs = []
         prompt_str = build_prompt(
             self._cfg.personality,
             primary_repo=str(root),
@@ -1513,7 +1519,7 @@ class OpenCodeRunner:
             write_mode=write_mode,
             write_dirs=write_dirs,
             external_inputs=evidence is not None and evidence.inputs.has_external_content,
-            open_channel=open_channel,
+            open_channel_prompt=open_channel_prompt,
         )
 
         run_started = time.time()

@@ -1863,6 +1863,11 @@ class OIWatcher(discord.Client):
             # Open-channel cost cap: runs (reply runs and summary runs) per
             # owner channel per hour, tracked in memory.
             open_channel = owner_channel_id in target.open_channels
+            open_prompt = None
+            if open_channel:
+                open_prompt = target.open_channel_prompt_for(
+                    owner_channel_id, self._cfg.open_channel_prompt
+                )
             if (
                 open_channel
                 and self._open_runs_in_last_hour(owner_channel_id)
@@ -1990,8 +1995,9 @@ class OIWatcher(discord.Client):
                         )
                         if rendered_summary:
                             excerpt = (
-                                "ROLLING SUMMARY (may be incomplete; the newest "
-                                f"messages below win):\n{rendered_summary}\n\n{excerpt}"
+                                "ROLLING SUMMARY (UNTRUSTED DATA; may be "
+                                "incomplete; the newest messages below win):\n"
+                                f"{rendered_summary}\n\n{excerpt}"
                             )
                     prepared = await self._prepare_external(
                         question,
@@ -2037,7 +2043,7 @@ class OIWatcher(discord.Client):
                                 excerpt=excerpt,
                                 bot_name=bot_name,
                                 bot_id=bot_id,
-                                open_channel=open_channel,
+                                open_channel_prompt=open_prompt,
                             )
                         else:
                             reply = await self._runner.run(
@@ -2048,7 +2054,7 @@ class OIWatcher(discord.Client):
                                 member_id=participant_id,
                                 bot_name=bot_name,
                                 bot_id=bot_id,
-                                open_channel=open_channel,
+                                open_channel_prompt=open_prompt,
                             )
                             if not reply.ok and reply.error_class in {
                                 "protocol_missing_final_marker",
@@ -2070,7 +2076,7 @@ class OIWatcher(discord.Client):
                                     member_id=participant_id,
                                     bot_name=bot_name,
                                     bot_id=bot_id,
-                                    open_channel=open_channel,
+                                    open_channel_prompt=open_prompt,
                                 )
                     finally:
                         # Guaranteed cleanup on success, failure, rejection,

@@ -35,6 +35,10 @@ uv pip install -e . --force-reinstall --no-deps
   denied). `write_mode=docs-only` optionally grants `edit`/`write` for
   `*.md`/`*.txt` only (secrets and code stay denied), further narrowable via
   `write_dirs`. Reviews always run read-only.
+- Open-channel runs get no OI contract prompt. The model gets only identity and
+  repo facts, the untrusted-data sentence, the no-secrets line, and the final
+  marker and `[[OI_SILENT]]` rule, plus `personality` text when the per-channel
+  mode is `personality`. They always run read-only and skip behavioral memory.
 - Only the final completed OpenCode assistant message is deliverable;
   intermediate narration and reasoning never reach the outbox or Discord.
 - MR/PR references resolve only against configured watched repositories.
@@ -101,7 +105,7 @@ uv pip install -e . --force-reinstall --no-deps
 
 - `opencode/bootstrap.py` — dependency, auth, and model bootstrap.
 - `opencode/policy.py` — native fail-closed permission map.
-- `opencode/prompt.py` — embedded OI safety/evidence/response contract.
+- `opencode/prompt.py` — embedded OI safety/evidence/response contract; open-channel runs get only the minimal plumbing prompt.
 - `opencode/runner.py` — bounded async OpenCode subprocess runner.
 - `opencode/omp.py` — tool-free omp prompt path (`harness = "omp"`); no tools, session, or extensions.
 - `watch/discord_client.py` — admission, debounce, and Poster seam.

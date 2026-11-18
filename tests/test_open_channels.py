@@ -35,8 +35,7 @@ def test_build_prompt_open_channel_block_only_when_enabled():
     default = build_prompt()
     assert "OPEN CHANNEL MODE:" not in default
     assert OPEN_CHANNEL_SILENT not in default
-    enabled = build_prompt(open_channel=True)
-    assert "OPEN CHANNEL MODE:" in enabled
+    enabled = build_prompt(open_channel_prompt="none")
     assert OPEN_CHANNEL_SILENT in enabled
     assert FINAL_OUTPUT_MARKER in enabled
 
@@ -109,7 +108,7 @@ def test_silent_store_complete_jobs_silent_empty_ids_is_noop(tmp_path):
 
 @pytest.mark.asyncio
 async def test_open_channel_thanks_stays_silent_and_posts_nothing(tmp_path, monkeypatch):
-    """A human pleasantry runs once with open_channel=True and posts nothing."""
+    """A human pleasantry runs once with open_channel_prompt set and posts nothing."""
     watcher = make_watcher(tmp_path, open_channels=(111,), post_hourly_cap=20)
     channel = FakeChannel(111)
     message = FakeMessage(1, channel, FakeAuthor(7), "thanks everyone!", [])
@@ -118,7 +117,7 @@ async def test_open_channel_thanks_stays_silent_and_posts_nothing(tmp_path, monk
 
     async def fake_run(*args, **kwargs):
         """Declare model silence for the pleasantry."""
-        assert kwargs.get("open_channel") is True
+        assert kwargs.get("open_channel_prompt") == "none"
         return Reply(f"{FINAL_OUTPUT_MARKER}\n{OPEN_CHANNEL_SILENT}", "sha")
 
     async def fake_deliver(self, **kwargs):
@@ -151,7 +150,7 @@ async def test_open_channel_question_gets_exactly_one_reply(tmp_path, monkeypatc
 
     async def fake_run(target, author, question, excerpt, **kwargs):
         """Answer the open-channel question."""
-        assert kwargs.get("open_channel") is True
+        assert kwargs.get("open_channel_prompt") == "none"
         runs.append(question)
         return Reply("the flaky test again", "sha")
 
@@ -306,7 +305,7 @@ async def test_two_open_channels_run_third_closed_does_not(tmp_path, monkeypatch
 
     async def fake_run(target, author, question, excerpt, **kwargs):
         """Answer each open-channel question once."""
-        assert kwargs.get("open_channel") is True
+        assert kwargs.get("open_channel_prompt") == "none"
         runs.append(question)
         return Reply("answer", "sha")
 

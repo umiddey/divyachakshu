@@ -318,11 +318,11 @@ async def test_open_channel_summary_run_counts_against_hourly_cap(tmp_path, monk
     m2 = FakeMessage(2, channel, FakeAuthor(7), "any news?", [])
     m3 = FakeMessage(3, channel, FakeAuthor(7), "thanks everyone!", [])
     channel._history = [m3, m2, m1]  # newest first
-    reply_runs: list[bool] = []
+    reply_runs: list[str | None] = []
     prompts = []
 
     async def fake_run(*args, **kwargs):
-        reply_runs.append(kwargs.get("open_channel"))
+        reply_runs.append(kwargs.get("open_channel_prompt"))
         return Reply(f"{FINAL_OUTPUT_MARKER}\n{OPEN_CHANNEL_SILENT}", "sha")
 
     async def fake_run_raw_prompt(prompt, *, system_prompt="", timeout=60, steps=1, model=""):
@@ -343,14 +343,14 @@ async def test_open_channel_summary_run_counts_against_hourly_cap(tmp_path, monk
     # One reply run + one summary run against open_channel_runs_per_hour,
     # and the silent completion still updated the summary.
     assert watcher._open_runs_in_last_hour(111) == 2
-    assert reply_runs == [True]
+    assert reply_runs == ["none"]
     assert len(prompts) == 1
 
     await _process_messages(watcher, channel, m2)
     await asyncio.sleep(0.05)
 
     # The next trigger is deferred by the open-run cap, not run again.
-    assert reply_runs == [True]
+    assert reply_runs == ["none"]
     assert len(prompts) == 1
     assert watcher._store._conn.execute(
         "SELECT status, last_error_class FROM mention_jobs WHERE source_message_id = 2"
