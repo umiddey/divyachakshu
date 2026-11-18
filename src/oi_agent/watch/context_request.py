@@ -14,10 +14,6 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-# Default excerpt window; mirrors discord_client.EXCERPT_LIMIT (kept here so
-# clamping never depends on the Discord layer).
-DEFAULT_EXCERPT_LIMIT = 40
-
 # Hard sanity limits for the model-authored spec before config clamping.
 MAX_SPEC_COUNT = 10_000
 MAX_SPEC_SINCE_DAYS = 3_650
@@ -214,6 +210,7 @@ def bounded_window(
     *,
     max_context_messages: int,
     max_context_age_days: int,
+    default_count: int,
     now: datetime | None = None,
 ) -> tuple[int, datetime | None]:
     """Clamp a spec against config caps.
@@ -222,13 +219,14 @@ def bounded_window(
         request: Parsed spec; None means the default window.
         max_context_messages: Hard cap on fetched messages.
         max_context_age_days: Hard cap on look-back days.
+        default_count: Configured default message count (``context_messages``).
         now: Injectable clock for deterministic tests.
 
     Returns:
         (limit, after): fetch limit and optional server-side cutoff for
         ``_thread_excerpt``.
     """
-    limit = DEFAULT_EXCERPT_LIMIT
+    limit = default_count
     after: datetime | None = None
     if request is not None:
         if request.count is not None:

@@ -45,15 +45,22 @@ uv pip install -e . --force-reinstall --no-deps
   conversation-to-session mapping exists. Bounded current Discord context may
   still be included. Count each successful delivery batch once; failed or
   duplicate completions must not double-run anything.
+- `!fresh`/`!new` and `oi session forget` clear one conversation's stored
+  rolling summary only; they never widen permissions or erase repository state.
 - Never log prompts, repository evidence, replies, model reasoning, credentials,
-  or raw JSONL events. Bounded metadata only.
+  or raw JSONL events. Bounded metadata only. The rolling summary is never
+  logged.
 - Posting is gated by the channel allowlist + per-channel hourly cap + kill
   switch (`oi pause`). Poster is the only Discord sender.
 - SQLite stores only pause/cap state, durable queue/outbox metadata, scope
-  cursors, and bounded, structured, versioned behavioral
-  memory signals (scoped member profiles, expiring transient
-  state, team pulse, and agent calibration). Never store prompts, repository evidence,
-  reasoning, source message bodies, thread excerpts, or free-form generated text.
+  cursors, one schema-validated rolling summary per conversation (the ONLY
+  model-written text allowed: rendered <= `summary_max_chars`, controller-
+  validated, secret-looking items dropped, never logged, deletable via
+  `!fresh` and `oi session forget`), and bounded, structured, versioned
+  behavioral memory signals (scoped member profiles, expiring transient
+  state, team pulse, and agent calibration). Never store prompts, repository
+  evidence, reasoning, source message bodies, thread excerpts, or other
+  free-form generated text.
 - Bounded outbound reply chunks are stored in the SQLite outbox ONLY until
   Discord delivery confirmation, after which body text is scrubbed (`body = NULL`).
 

@@ -1,92 +1,15 @@
 """Mocked end-to-end tests for the Discord admission and OpenCode path."""
 
 import asyncio
-from datetime import UTC, datetime
 
-import discord
 import pytest
+from conftest import FakeAuthor, FakeChannel, FakeMention, FakeMessage
+from conftest import make_watcher as _watcher
+from conftest import process_messages as _process_messages
 
 from oi_agent.agent.reply import Reply
-from oi_agent.config import Config, WatchTarget
 from oi_agent.poster import DeliveryResult
-from oi_agent.store import Store
 from oi_agent.watch import discord_client
-from oi_agent.watch.discord_client import OIWatcher
-
-
-class FakeAuthor:
-    """Minimal Discord author object."""
-
-    def __init__(self, user_id, name="user1", bot=False):
-        """Store author fields consumed by the watcher."""
-        self.id = user_id
-        self.display_name = name
-        self.bot = bot
-
-
-class FakeMention:
-    """Minimal Discord mention object."""
-
-    def __init__(self, user_id, display_name="ultron"):
-        """Store the mentioned user ID and its display name."""
-        self.id = user_id
-        self.display_name = display_name
-
-class FakeResponse:
-    """Mock response for discord exception initialization."""
-
-    def __init__(self, status=404, reason="Not Found"):
-        self.status = status
-        self.reason = reason
-
-
-class FakeChannel:
-
-    def __init__(self, channel_id, history=None, parent_id=None):
-        """Create a fake channel."""
-        self.id = channel_id
-        self.parent_id = parent_id
-        self._history = list(history or [])
-
-    async def history(self, limit=50, after=None, oldest_first=False):
-        """Yield fake messages with optional after filter."""
-        msgs = list(self._history)
-        if after is not None:
-            after_id = after.id if hasattr(after, "id") else int(after)
-            msgs = [m for m in msgs if m.id > after_id]
-        if limit is not None:
-            msgs = msgs[:limit]
-        for message in msgs:
-            yield message
-
-    async def fetch_message(self, message_id):
-        """Fetch a fake message by snowflake ID."""
-        for m in self._history:
-            if m.id == message_id:
-                return m
-        raise discord.NotFound(FakeResponse(404), "message not found")
-
-
-class FakeMessage:
-    """Minimal incoming Discord message."""
-
-    def __init__(self, message_id, channel, author, content, mentions):
-        """Create a fake event message."""
-        self.id = message_id
-        self.channel = channel
-        self.author = author
-        self.content = content
-        self.mentions = mentions
-        self.created_at = datetime.now(UTC)
-        self.attachments = []
-        self.embeds = []
-
-
-def _watcher(tmp_path, channel_id=111):
-    """Build a watcher with one configured target and isolated state."""
-    cfg = Config()
-    cfg.watches = [WatchTarget(channel_id, str(tmp_path / "repo"), 99, 3)]
-    return OIWatcher(cfg, Store(tmp_path / "state.db"))
 
 
 @pytest.fixture(autouse=True)
@@ -291,30 +214,6 @@ async def test_runner_receives_bot_identity(tmp_path, monkeypatch):
     await asyncio.sleep(0.05)
 
     assert captured == {"bot_name": "UltronBot", "bot_id": 99}
-
-
-async def _process_messages(watcher, channel, *messages):
-    """Run admitted messages through the durable processor without worker timing.
-
-    Args:
-        watcher (OIWatcher): Watcher backed by an isolated real store.
-        channel (FakeChannel): Message source channel or thread.
-        messages (FakeMessage): Messages admitted to this single batch.
-
-    Returns:
-        None: Processing and immediate delivery have completed.
-    """
-    watcher._channel_cache[channel.id] = channel
-    target, owner = watcher._resolve_target(channel.id, channel)
-    for message in messages:
-        watcher._store.admit_mention_job(
-            source_message_id=message.id,
-            conversation_id=channel.id,
-            owner_channel_id=owner,
-            repo_path=target.primary_repo,
-        )
-    conversation_id, jobs = watcher._store.claim_next_conversation_jobs()
-    await watcher._process_conversation_jobs(conversation_id, jobs)
 
 
 @pytest.mark.parametrize(

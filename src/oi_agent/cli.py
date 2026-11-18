@@ -60,6 +60,7 @@ from .opencode.paths import resolve_opencode_paths
 from .opencode.storage import human_bytes, root_usage
 from .setup_save import SetupSaveError, apply_setup
 from .store import Store
+from .summary import render_summary
 from .ui import run_ui
 
 app = typer.Typer(
@@ -1215,6 +1216,48 @@ def session_forget(
             console.print(f"[green]forgot summary for conversation {conversation}[/green]")
         else:
             console.print(f"no summary stored for conversation {conversation}")
+    finally:
+        store.close()
+
+
+@session_app.command("show")
+def session_show(
+    conversation: int = typer.Option(..., "--conversation", min=1),
+    config: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c"),
+) -> None:
+    """Print one conversation's rendered rolling summary and metadata.
+
+    Prints locally only (the owner's quality check); the summary is never
+    logged. Render-time decay and the cap use the configured values, so the
+    output matches exactly what a prompt would see now.
+
+    Args:
+        conversation: Required positive Discord channel or thread ID.
+        config: Configuration containing the local state database path.
+    """
+    cfg = _load_or_die(config)
+    store = Store(Path(cfg.db_path).expanduser())
+    try:
+        rows = store.list_summaries(conversation)
+        if not rows:
+            console.print(f"no summary stored for conversation {conversation}")
+            return
+        row = rows[0]
+        console.print(f"Conversation: {row['conversation_id']}")
+        console.print(f"Last summarized message: {row['last_summarized_message_id']}")
+        updated_at = float(row["updated_at"])
+        console.print(
+            "Updated (UTC): "
+            f"{datetime.fromtimestamp(updated_at, UTC).isoformat(timespec='seconds')}"
+        )
+        rendered = render_summary(
+            row["summary_json"],
+            today=datetime.now(UTC).date(),
+            decay_days=cfg.summary_decay_days,
+            max_chars=cfg.summary_max_chars,
+        )
+        console.print(f"Rendered ({len(rendered)} chars):")
+        console.print(rendered if rendered else "(empty: nothing survived decay/cap)")
     finally:
         store.close()
 

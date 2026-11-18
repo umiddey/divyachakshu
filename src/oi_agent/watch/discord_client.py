@@ -60,6 +60,7 @@ from ..reminders import (
     tomorrow_at,
 )
 from ..store import Store
+from ..summary import render_summary
 from .attachments import (
     context_attachments_requested,
     gather_candidates,
@@ -70,7 +71,6 @@ from .context_request import ContextRequestMemory, bounded_window
 from .gate import Action, MentionedUser, evaluate
 
 logger = logging.getLogger(__name__)
-EXCERPT_LIMIT = 40
 # Per-line render cap for history evidence lines: Discord's own hard maximum
 # for one message (4,000 chars, Nitro). Any message the watcher admitted fits
 # whole up to here; longer bodies are clipped WITH an explicit marker naming
@@ -321,7 +321,7 @@ def _chronological(messages: list) -> list:
 
 async def _thread_excerpt(
     channel: discord.abc.Messageable,
-    limit: int = EXCERPT_LIMIT,
+    limit: int,
     *,
     bot_user_id: int = 0,
     after: datetime | None = None,
@@ -358,7 +358,7 @@ class ConversationContext:
 
 async def _fetch_conversation_context(
     channel: discord.abc.Messageable,
-    limit: int = EXCERPT_LIMIT,
+    limit: int,
     bot_user_id: int = 0,
     after: datetime | None = None,
     *,
@@ -799,7 +799,7 @@ class OIWatcher(discord.Client):
         ("do it this time") reuse it; any failure falls open to the default
         40-message window.
         """
-        limit, after = EXCERPT_LIMIT, None
+        limit, after = self._cfg.context_messages, None
         try:
             request = await self._runner.infer_context_request(question)
         except Exception:  # noqa: BLE001 - expansion is best-effort, never fatal
@@ -825,6 +825,7 @@ class OIWatcher(discord.Client):
                 request,
                 max_context_messages=self._cfg.max_context_messages,
                 max_context_age_days=self._cfg.max_context_age_days,
+                default_count=self._cfg.context_messages,
             )
         return await _fetch_conversation_context(
             channel,
@@ -1800,6 +1801,21 @@ class OIWatcher(discord.Client):
                 # member id so only current participants reach the prompt.
                 participant_id = str(author_id) if author_id else None
                 try:
+                    if fresh_requested:
+                        self._store.forget_summary(conversation_id)
+                    summary_json = self._store.get_summary(conversation_id)
+                    if summary_json:
+                        rendered_summary = render_summary(
+                            summary_json,
+                            today=datetime.now(timezone.utc).date(),
+                            decay_days=self._cfg.summary_decay_days,
+                            max_chars=self._cfg.summary_max_chars,
+                        )
+                        if rendered_summary:
+                            excerpt = (
+                                "ROLLING SUMMARY (may be incomplete; the newest "
+                                f"messages below win):\n{rendered_summary}\n\n{excerpt}"
+                            )
                     prepared = await self._prepare_external(
                         question,
                         burst_messages=burst_messages,

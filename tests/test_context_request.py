@@ -15,7 +15,6 @@ import pytest
 from oi_agent.config import Config, WatchTarget, load_config, save_config
 from oi_agent.opencode.runner import OpenCodeRunner
 from oi_agent.watch.context_request import (
-    DEFAULT_EXCERPT_LIMIT,
     ContextRequest,
     bounded_window,
     mentions_expansion,
@@ -116,7 +115,7 @@ def test_parse_spec_accepts_iso_since_date():
 def test_since_date_overrides_days_and_uses_day_start():
     request = ContextRequest(since_days=10, since_date="2026-09-10")
     limit, after = bounded_window(
-        request, max_context_messages=200, max_context_age_days=30,
+        request, max_context_messages=200, max_context_age_days=30, default_count=40,
         now=datetime(2026, 9, 20, 22, 16, tzinfo=timezone.utc),
     )
     # Start of Sept 10, NOT now-minus-10-days (22:16 cutoff amputated the day).
@@ -126,7 +125,7 @@ def test_since_date_overrides_days_and_uses_day_start():
 def test_named_date_is_not_age_clamped():
     request = ContextRequest(since_date="2026-01-01")
     _, after = bounded_window(
-        request, max_context_messages=200, max_context_age_days=30,
+        request, max_context_messages=200, max_context_age_days=30, default_count=40,
         now=datetime(2026, 9, 21, tzinfo=timezone.utc),
     )
     assert after == datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -139,6 +138,7 @@ def test_date_window_uses_context_cap_without_explicit_count():
         ContextRequest(since_date="2026-09-10"),
         max_context_messages=500,
         max_context_age_days=30,
+        default_count=40,
     )
     assert limit == 500
     assert after == datetime(2026, 9, 10, tzinfo=timezone.utc)
@@ -147,7 +147,7 @@ def test_date_window_uses_context_cap_without_explicit_count():
 def test_since_days_still_age_clamped():
     request = ContextRequest(since_days=1000)
     _, after = bounded_window(
-        request, max_context_messages=200, max_context_age_days=30,
+        request, max_context_messages=200, max_context_age_days=30, default_count=40,
         now=datetime(2026, 9, 21, tzinfo=timezone.utc),
     )
     assert after == datetime(2026, 8, 22, tzinfo=timezone.utc)
@@ -157,8 +157,10 @@ def test_since_days_still_age_clamped():
 
 
 def test_bounded_window_default_without_request():
-    limit, after = bounded_window(None, max_context_messages=200, max_context_age_days=30)
-    assert limit == DEFAULT_EXCERPT_LIMIT
+    limit, after = bounded_window(
+        None, max_context_messages=200, max_context_age_days=30, default_count=40
+    )
+    assert limit == 40
     assert after is None
 
 
@@ -169,6 +171,7 @@ def test_bounded_window_clamps_to_config_caps():
         request,
         max_context_messages=200,
         max_context_age_days=30,
+        default_count=40,
         now=now,
     )
     assert limit == 200
@@ -177,7 +180,9 @@ def test_bounded_window_clamps_to_config_caps():
 
 def test_bounded_window_honors_undersized_count():
     request = ContextRequest(count=10, since_days=None)
-    limit, _ = bounded_window(request, max_context_messages=200, max_context_age_days=30)
+    limit, _ = bounded_window(
+        request, max_context_messages=200, max_context_age_days=30, default_count=40
+    )
     assert limit == 10
 
 
@@ -272,7 +277,7 @@ async def test_thread_excerpt_honors_limit_and_after():
     messages = [_Msg(i, now - timedelta(hours=i)) for i in range(1, 9)]
     channel = _WindowChannel(messages)
 
-    default_text = await _thread_excerpt(channel, bot_user_id=99)
+    default_text = await _thread_excerpt(channel, 40, bot_user_id=99)
     lines = default_text.splitlines()
     # The first line is the honest bounded-window header, then the messages.
     assert lines[0].startswith("CONVERSATION HISTORY (UNTRUSTED DATA):")
