@@ -22,8 +22,11 @@ uv pip install -e . --force-reinstall --no-deps
 
 ## Safety invariants — never break these
 
-- OpenCode is the only model/tool/session harness. Do not add provider HTTP,
-  fallback engines, custom tool loops, manifests, or skills.
+- OpenCode is the only model/tool/session harness for repository work. Tool-free
+  raw prompts may also run through omp (`harness = "omp"`), always with
+  `--no-tools` and a private environment. Do not add provider HTTP, fallback
+  engines, custom tool loops, manifests, or skills. Do not give omp tools until
+  a reviewed tool-policy extension exists.
 - Git remote creds are read-scoped only. Never add code that writes/pushes.
 - OpenCode runs with `OPENCODE_DISABLE_PROJECT_CONFIG=1`, isolated HOME/XDG
   roots, an inline native `agent.oi`, and no `--auto`.
@@ -100,6 +103,7 @@ uv pip install -e . --force-reinstall --no-deps
 - `opencode/policy.py` — native fail-closed permission map.
 - `opencode/prompt.py` — embedded OI safety/evidence/response contract.
 - `opencode/runner.py` — bounded async OpenCode subprocess runner.
+- `opencode/omp.py` — tool-free omp prompt path (`harness = "omp"`); no tools, session, or extensions.
 - `watch/discord_client.py` — admission, debounce, and Poster seam.
 - `store.py` — pause, cap, durable queue, and conversation summary state.
 - `daemon.py` — dedicated user and hardened systemd lifecycle.

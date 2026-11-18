@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- New `harness = "omp"` option. Tool-free prompts (classifier, context-request
+  fallback, summaries) run through omp with every tool, session, and extension
+  disabled, in a private environment. Repository replies and research stay on
+  OpenCode. The default stays `opencode`.
+- `oi doctor` with `harness = "omp"` checks that omp lists the configured chat
+  and summary models and names the `omp login` command when one is missing.
+
 ## 0.2.0 - 2026-11-18
 
 **Breaking:** this release is 0.2.0, not 0.1.2, because the session keys

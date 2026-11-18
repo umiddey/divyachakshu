@@ -302,6 +302,28 @@ answer session receives the summary as bounded untrusted evidence; any
 outbound link not in the research source list or the user's own message is
 replaced with `[link removed]` and embeds are suppressed.
 
+## Model harness: OpenCode or omp
+
+OpenCode runs every repository reply, research run, and external-evidence task.
+That does not change. `harness` only chooses where tool-free single prompts run:
+the classifier, the context-request fallback, and rolling summaries.
+
+- `harness = "opencode"` (default): every prompt goes through OpenCode.
+- `harness = "omp"`: tool-free prompts run through omp in a private environment
+  under `~/.local/share/oi/`. Each call uses `--no-tools`, `--no-session`,
+  `--no-extensions`, `--no-skills`, `--no-rules`, and `--no-context-files`, so
+  the model has no tools and no authority. Repository replies still use OpenCode.
+
+```bash
+oi config set harness omp
+oi config set omp_binary omp     # default; set a path if omp is not on PATH
+oi doctor
+```
+
+`oi doctor` lists the models omp can use in that private environment. It fails
+when `opencode_model` or `summary_model` is missing and prints the `omp login`
+command for that provider.
+
 ## Troubleshooting
 
 - **Bot never replies** — the message did not explicitly address the bot.
