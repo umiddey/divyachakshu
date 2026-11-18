@@ -220,6 +220,21 @@ def test_model_status_empty_listing_without_live_credential_fails(
     assert (inactive.available, inactive.verified) == (False, False)
 
 
+def test_model_status_free_opencode_provider_needs_any_live_credential(
+        tmp_path, monkeypatch, seed_credential_db):
+    """`opencode/*` free models have no credential row; any live login unlocks them."""
+    paths = resolve_opencode_paths(tmp_path)
+    monkeypatch.setattr(bootstrap, "list_models", lambda *args, **kwargs: [])
+    free = "opencode/deepseek-v4.1-flash-free"
+    assert bootstrap.model_status("opencode", paths, free) == bootstrap.ModelStatus(False, False)
+
+    seed_credential_db(paths.data_home, "zai-coding-plan", active=1)
+    assert bootstrap.model_status("opencode", paths, free) == bootstrap.ModelStatus(True, False)
+    # The relaxation is for the free provider only.
+    other = bootstrap.model_status("opencode", paths, "openrouter/deepseek/deepseek-v4.1-flash")
+    assert other == bootstrap.ModelStatus(False, False)
+
+
 def test_bootstrap_probe_subcommands_pass_standalone(tmp_path, monkeypatch):
     """Shelled bootstrap subcommands run --standalone with a bounded timeout.
 

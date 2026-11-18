@@ -422,7 +422,12 @@ def model_status(binary: str, paths: OpenCodePaths, model: str,
     if models:
         return ModelStatus(model in models, True)
     provider = model.split("/", 1)[0]
-    return ModelStatus(provider in credential_integrations(paths), False)
+    integrations = credential_integrations(paths)
+    # The free `opencode` (Zen) provider has no credential row of its own. Live runs
+    # (2026-11-18, opencode/deepseek-v4.1-flash-free) answered with only zai logins in
+    # the isolated store and failed with `provider.no-route` with none, so any live
+    # credential counts for it.
+    return ModelStatus(provider in integrations or (provider == "opencode" and bool(integrations)), False)
 
 
 def bootstrap(binary: str, paths: OpenCodePaths, *, install: bool = False,
