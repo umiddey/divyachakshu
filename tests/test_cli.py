@@ -72,6 +72,103 @@ def test_watch_remove_preserves_previous_file_on_final_target(tmp_path):
     assert cfg_path.read_bytes() == before
 
 
+# --- open channels (P2) ---------------------------------------------------------
+
+
+def test_config_set_open_channel_globals_roundtrip(tmp_path):
+    """oi config set edits the open-channel globals; show displays them."""
+    cfg_path, _ = _watch_config(tmp_path)
+    for key, value in (
+        ("context_messages", "25"),
+        ("open_channel_runs_per_hour", "12"),
+        ("summary_model", "provider/summarizer"),
+        ("summary_max_chars", "2000"),
+        ("summary_decay_days", "90"),
+        ("summary_bootstrap_days", "14"),
+        ("summary_bootstrap_messages", "150"),
+    ):
+        result = runner.invoke(app, ["config", "set", key, value, "--config", str(cfg_path)])
+        assert result.exit_code == 0, result.output
+    shown = runner.invoke(app, ["config", "show", "--config", str(cfg_path)])
+    assert shown.exit_code == 0, shown.output
+    assert "context_messages = 25" in shown.output
+    assert "open_channel_runs_per_hour = 12" in shown.output
+    assert "summary_model = provider/summarizer" in shown.output
+    assert "summary_bootstrap_messages = 150" in shown.output
+    bad = runner.invoke(app, ["config", "set", "context_messages", "5", "--config", str(cfg_path)])
+    assert bad.exit_code == 1
+
+
+def test_open_channel_add_show_remove_on_guild_watch(tmp_path):
+    """Two open channels on one guild watch: add, shown by config show, removed."""
+    cfg_path, _ = _guild_watch_config(tmp_path, allowed="333,444")
+    for channel in (333, 444):
+        result = runner.invoke(app, [
+            "config", "open-channel-add", str(channel), "--watch", "222",
+            "--config", str(cfg_path),
+        ])
+        assert result.exit_code == 0, result.output
+
+    shown = runner.invoke(app, ["config", "show", "--config", str(cfg_path)])
+    assert shown.exit_code == 0, shown.output
+    assert "open_channels=[333, 444]" in shown.output
+
+    result = runner.invoke(app, ["config", "open-channel-remove", "333", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    back = cli.load_config(cfg_path)
+    assert back.watches[0].open_channels == [444]
+
+
+def test_open_channel_add_channel_watch_own_id(tmp_path):
+    """A channel watch opens only its own channel id; a foreign id is refused."""
+    cfg_path, _ = _watch_config(tmp_path)
+    result = runner.invoke(app, [
+        "config", "open-channel-add", "111", "--watch", "111",
+        "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).watches[0].open_channels == [111]
+
+    foreign = runner.invoke(app, [
+        "config", "open-channel-add", "999", "--watch", "111",
+        "--config", str(cfg_path),
+    ])
+    assert foreign.exit_code == 1
+    assert cli.load_config(cfg_path).watches[0].open_channels == [111]
+
+
+def test_watch_add_without_flag_keeps_open_channels(tmp_path):
+    """Re-running watch-add without --open-channels carries the open channels over."""
+    cfg_path, repo = _guild_watch_config(tmp_path, allowed="333,444")
+    result = runner.invoke(app, [
+        "config", "watch-add", "--guild-id", "222", "--repo-path", str(repo),
+        "--allowed-channels", "333,444", "--open-channels", "333",
+        "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    # Same watch again, flag omitted: open channels survive the replacement.
+    result = runner.invoke(app, [
+        "config", "watch-add", "--guild-id", "222", "--repo-path", str(repo),
+        "--allowed-channels", "333,444",
+        "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).watches[0].open_channels == [333]
+
+
+def test_open_channel_add_errors(tmp_path):
+    """Unknown watch targets and unknown open channels fail cleanly."""
+    cfg_path, _ = _watch_config(tmp_path)
+    result = runner.invoke(app, [
+        "config", "open-channel-add", "333", "--watch", "555",
+        "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 1
+    result = runner.invoke(app, ["config", "open-channel-remove", "333", "--config", str(cfg_path)])
+    assert result.exit_code == 1
+
+
 def test_run_help_has_no_legacy_transport_switches():
     """Runtime help exposes neither streaming nor answer-log controls."""
     result = runner.invoke(app, ["run", "--help"], env={"COLUMNS": "200"})
@@ -1540,22 +1637,13 @@ def test_migrate_legacy_success_mentions_table_drop(tmp_path, monkeypatch):
     assert "legacy tables were dropped" in result.output
 
 
-def test_config_set_session_limits_roundtrip(tmp_path):
-    """CLI persists the turn cap and disabled TTL, rejecting unsafe replacements."""
+def test_config_set_rejects_removed_session_keys(tmp_path):
+    """Session-rotation keys are gone: config set refuses them without writing."""
     cfg_path, _ = _watch_config(tmp_path)
-    for key, value in (("max_session_turns", "12"), ("session_ttl_days", "0")):
-        result = runner.invoke(app, ["config", "set", key, value, "--config", str(cfg_path)])
-        assert result.exit_code == 0, result.output
-    cfg = cli.load_config(cfg_path)
-    assert (cfg.max_session_turns, cfg.session_ttl_days) == (12, 0)
-    shown = runner.invoke(app, ["config", "show", "--config", str(cfg_path)])
-    assert shown.exit_code == 0, shown.output
-    assert "max_session_turns = 12" in shown.output
-    assert "session_ttl_days = 0" in shown.output
     before = cfg_path.read_bytes()
-    for key, value in (("max_session_turns", "0"), ("session_ttl_days", "-1")):
-        bad = runner.invoke(app, ["config", "set", key, value, "--config", str(cfg_path)])
-        assert bad.exit_code != 0
+    for key in ("max_session_turns", "session_ttl_days"):
+        result = runner.invoke(app, ["config", "set", key, "12", "--config", str(cfg_path)])
+        assert result.exit_code == 1
         assert cfg_path.read_bytes() == before
 
 

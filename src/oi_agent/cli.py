@@ -883,6 +883,9 @@ def load_secrets(path: Path = DEFAULT_SECRETS_PATH) -> None:
 # Config Subcommands
 # ==============================================================================
 
+# Shared default so commands can avoid re-calling typer.Option in every signature.
+_DEFAULT_CONFIG_OPTION = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c")
+
 config_app = typer.Typer(help="View and edit the OpenCode-only configuration.")
 app.add_typer(config_app, name="config")
 
@@ -898,8 +901,10 @@ def config_show(
         "discord_token_env", "db_path", "personality", "max_reply_chars",
         "reply_delivery", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "environment_mode", "write_mode",
-        "write_dirs", "max_session_turns", "session_ttl_days",
-        "max_context_messages", "max_context_age_days",
+        "write_dirs", "max_context_messages", "max_context_age_days",
+        "context_messages", "open_channel_runs_per_hour", "summary_model",
+        "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
+        "summary_bootstrap_messages",
         "external_inputs", "max_external_evidence_items", "max_attachments",
         "max_attachment_bytes", "image_inputs",
     ):
@@ -912,6 +917,8 @@ def config_show(
             filters.append(f"ignored={target.ignored_channels}")
         if target.allowed_channels:
             filters.append(f"allowed={target.allowed_channels}")
+        if target.open_channels:
+            filters.append(f"open_channels={target.open_channels}")
         filter_str = f" ({', '.join(filters)})" if filters else ""
         reminder_str = f" | reminder-channel {target.reminder_channel_id}" if target.reminder_channel_id > 0 else ""
         console.print(
@@ -938,8 +945,10 @@ def config_set(
         "personality", "max_reply_chars", "reply_delivery", "discord_token_env",
         "db_path", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "environment_mode", "write_mode",
-        "write_dirs", "max_session_turns", "session_ttl_days",
-        "max_context_messages", "max_context_age_days",
+        "write_dirs", "max_context_messages", "max_context_age_days",
+        "context_messages", "open_channel_runs_per_hour", "summary_model",
+        "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
+        "summary_bootstrap_messages",
         "external_inputs", "max_external_evidence_items", "max_attachments",
         "max_attachment_bytes", "image_inputs",
     }
@@ -978,6 +987,7 @@ def config_watch_add(
     repos: str = typer.Option("", help="comma-separated list of local repo clone paths (multi-repo)"),
     ignored_channels: str = typer.Option("", help="comma-separated channel IDs to ignore for guild watch"),
     allowed_channels: str = typer.Option("", help="comma-separated channel IDs to specifically allow for guild watch"),
+    open_channels: str = typer.Option("", help="comma-separated channel IDs where oi reads and may reply"),
     bot_user_id: int = typer.Option(0, help="bot user id (mention trigger)"),
     post_hourly_cap: int = typer.Option(3, help="max replies per hour"),
     reminder_channel_id: int = typer.Option(0, help="Discord channel ID for this watch's reminder announcements (0 = off)"),
@@ -1011,11 +1021,18 @@ def config_watch_add(
 
     ignored_list = _parse_id_list(ignored_channels, "ignored_channels")
     allowed_list = _parse_id_list(allowed_channels, "allowed_channels")
+    open_list = _parse_id_list(open_channels, "open_channels")
 
     if channel_id > 0:
+        previous = next((t for t in cfg.watches if t.channel_id == channel_id), None)
         cfg.watches = [t for t in cfg.watches if t.channel_id != channel_id]
     else:
+        previous = next((t for t in cfg.watches if t.guild_id == guild_id), None)
         cfg.watches = [t for t in cfg.watches if t.guild_id != guild_id]
+    # watch-add replaces the watch; without --open-channels carry the open
+    # channels over so re-running watch-add cannot silently drop them.
+    if not open_list and previous is not None:
+        open_list = list(previous.open_channels)
 
     cfg.watches.append(WatchTarget(
         channel_id=channel_id,
@@ -1027,6 +1044,7 @@ def config_watch_add(
         repos=resolved_paths,
         ignored_channels=ignored_list,
         allowed_channels=allowed_list,
+        open_channels=open_list,
     ))
     try:
         save_config(cfg, config)
@@ -1058,6 +1076,59 @@ def config_watch_remove(
         console.print(f"[red]cannot remove watch target: {exc}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]removed watch {target_id}[/green]")
+
+
+@config_app.command("open-channel-add")
+def config_open_channel_add(
+    channel_id: int = typer.Argument(..., help="Discord channel ID where oi reads every message and may reply"),
+    watch: int = typer.Option(..., help="channel ID or guild ID of the watch target that owns the channel"),
+    config: Path = _DEFAULT_CONFIG_OPTION,
+) -> None:
+    """Mark one channel open on a watch: oi reads every message and replies when useful."""
+    if channel_id <= 0 or watch <= 0:
+        console.print("[red]channel ID and watch ID must be positive integers (> 0)[/red]")
+        raise typer.Exit(1)
+    cfg = _load_or_die(config)
+    target = next((t for t in cfg.watches if t.channel_id == watch or t.guild_id == watch), None)
+    if target is None:
+        console.print(f"[red]no watch for channel/guild {watch}[/red]")
+        raise typer.Exit(1)
+    if channel_id in target.open_channels:
+        console.print(f"[yellow]channel {channel_id} is already open on watch {watch}[/yellow]")
+        return
+    target.open_channels.append(channel_id)
+    try:
+        save_config(cfg, config)
+    except ValueError as exc:
+        console.print(f"[red]cannot open channel {channel_id}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]channel {channel_id} is now open on watch {watch}[/green]")
+
+
+@config_app.command("open-channel-remove")
+def config_open_channel_remove(
+    channel_id: int = typer.Argument(..., help="Discord channel ID to close"),
+    config: Path = _DEFAULT_CONFIG_OPTION,
+) -> None:
+    """Close an open channel on whichever watch holds it."""
+    if channel_id <= 0:
+        console.print("[red]channel ID must be a positive integer (> 0)[/red]")
+        raise typer.Exit(1)
+    cfg = _load_or_die(config)
+    found = False
+    for target in cfg.watches:
+        if channel_id in target.open_channels:
+            target.open_channels.remove(channel_id)
+            found = True
+    if not found:
+        console.print(f"[red]channel {channel_id} is not open[/red]")
+        raise typer.Exit(1)
+    try:
+        save_config(cfg, config)
+    except ValueError as exc:
+        console.print(f"[red]cannot close channel {channel_id}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]channel {channel_id} is no longer open[/green]")
 
 
 @config_app.command("secret")

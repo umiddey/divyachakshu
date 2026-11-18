@@ -253,13 +253,14 @@ def scan_git_repos(root: Path, max_depth: int = 3) -> list[str]:
 _STR_FIELDS = (
     "discord_token_env", "db_path", "personality", "reply_delivery",
     "opencode_binary", "opencode_model", "environment_mode", "write_mode",
-    "external_inputs", "image_inputs",
+    "external_inputs", "image_inputs", "summary_model",
 )
 _INT_FIELDS = (
     "max_reply_chars", "opencode_steps", "opencode_timeout_seconds",
-    "max_session_turns", "session_ttl_days", "max_context_messages",
-    "max_context_age_days", "max_external_evidence_items",
-    "max_attachments", "max_attachment_bytes",
+    "max_context_messages", "max_context_age_days", "context_messages",
+    "open_channel_runs_per_hour", "summary_max_chars", "summary_decay_days",
+    "summary_bootstrap_days", "summary_bootstrap_messages",
+    "max_external_evidence_items", "max_attachments", "max_attachment_bytes",
 )
 _LIST_FIELDS = ("write_dirs",)
 
@@ -279,6 +280,7 @@ def watch_to_dict(wt) -> dict[str, Any]:
         "repos": list(wt.repo_paths),
         "ignored_channels": list(wt.ignored_channels),
         "allowed_channels": list(wt.allowed_channels),
+        "open_channels": list(wt.open_channels),
         "bot_user_id": wt.bot_user_id,
         "post_hourly_cap": wt.post_hourly_cap,
         "reminder_channel_id": wt.reminder_channel_id,
@@ -332,8 +334,8 @@ def watch_from_payload(payload: Any):
         raise ValueError("each watch must be a JSON object")
     known = {
         "channel_id", "guild_id", "repos", "ignored_channels",
-        "allowed_channels", "bot_user_id", "post_hourly_cap",
-        "reminder_channel_id",
+        "allowed_channels", "open_channels", "bot_user_id",
+        "post_hourly_cap", "reminder_channel_id",
     }
     unknown = set(payload) - known
     if unknown:
@@ -343,7 +345,7 @@ def watch_from_payload(payload: Any):
         ints[key] = _coerce_int(payload, key) if key in payload else 0
     ints["post_hourly_cap"] = _coerce_int(payload, "post_hourly_cap") if "post_hourly_cap" in payload else 3
     lists: dict[str, list[int]] = {}
-    for key in ("ignored_channels", "allowed_channels"):
+    for key in ("ignored_channels", "allowed_channels", "open_channels"):
         raw = payload.get(key, [])
         if not isinstance(raw, list):
             raise ValueError(f"{key} must be a list of integers")

@@ -201,50 +201,31 @@ def test_config_set_environment_mode_repairs_legacy_auto(tmp_path):
     assert load_config(path).environment_mode == "server"
 
 
-def test_session_limits_load_and_roundtrip(tmp_path):
-    """Older configs gain limits; explicit cap and disabled TTL survive saving."""
+def test_session_keys_accepted_dropped_and_never_written(tmp_path):
+    """Stale session-rotation keys load, drop, and are never written back."""
     path = tmp_path / "config.toml"
     path.write_text(
         f'opencode_binary = "{_binary()}"\n'
+        'max_session_turns = 5\n'
+        'session_ttl_days = 2\n'
         '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n',
         encoding="utf-8",
     )
     cfg = load_config(path)
-    assert (cfg.max_session_turns, cfg.session_ttl_days) == (30, 7)
-    cfg.max_session_turns = 1
-    cfg.session_ttl_days = 0
+    assert not hasattr(cfg, "max_session_turns")
+    assert not hasattr(cfg, "session_ttl_days")
     save_config(cfg, path)
-    back = load_config(path)
-    assert (back.max_session_turns, back.session_ttl_days) == (1, 0)
-
-
-@pytest.mark.parametrize("field, value", [
-    ("max_session_turns", 0),
-    ("session_ttl_days", -1),
-    ("max_session_turns", True),
-    ("session_ttl_days", 1.5),
-    ("max_session_turns", "30"),
-])
-def test_session_limits_reject_invalid_values_without_replacing_config(tmp_path, field, value):
-    """Both TOML input and direct saves reject invalid session policies."""
-    import json
-
-    path = tmp_path / "config.toml"
-    cfg = _valid_config()
-    save_config(cfg, path)
-    before = path.read_bytes()
-    setattr(cfg, field, value)
-    with pytest.raises(ValueError, match=field):
-        save_config(cfg, path)
-    assert path.read_bytes() == before
+    text = path.read_text(encoding="utf-8")
+    assert "max_session_turns" not in text
+    assert "session_ttl_days" not in text
+    # Even a stale, wrong-typed value loads: the keys are dropped, never parsed.
     path.write_text(
-        f'{field} = {json.dumps(value)}\n'
+        'max_session_turns = "junk"\n'
         f'opencode_binary = "{_binary()}"\n'
         '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=field):
-        load_config(path)
+    assert not hasattr(load_config(path), "max_session_turns")
 
 
 # --- controller-owned external inputs (plan corrections 8 + 12) -----------------
@@ -461,3 +442,186 @@ def test_is_reminder_channel_returns_owning_watch():
     assert cfg.is_reminder_channel(300) is cfg.watches[1]
     assert cfg.is_reminder_channel(999) is None
     assert cfg.is_reminder_channel(0) is None
+
+
+# --- P1: open-channel globals ---------------------------------------------------
+
+
+def test_open_channel_globals_defaults():
+    """The shipped open-channel defaults: 40 messages, 6 runs/hour, opencode model."""
+    cfg = Config()
+    assert cfg.context_messages == 40
+    assert cfg.open_channel_runs_per_hour == 6
+    assert cfg.summary_model == ""
+    assert cfg.summary_max_chars == 1_500
+    assert cfg.summary_decay_days == 60
+    assert cfg.summary_bootstrap_days == 30
+    assert cfg.summary_bootstrap_messages == 300
+
+
+def test_open_channel_globals_roundtrip(tmp_path):
+    """Every new global survives a validated TOML round-trip."""
+    cfg = _valid_config()
+    cfg.context_messages = 25
+    cfg.open_channel_runs_per_hour = 12
+    cfg.summary_model = "provider/summarizer"
+    cfg.summary_max_chars = 2_000
+    cfg.summary_decay_days = 90
+    cfg.summary_bootstrap_days = 14
+    cfg.summary_bootstrap_messages = 150
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    back = load_config(path)
+    assert back.context_messages == 25
+    assert back.open_channel_runs_per_hour == 12
+    assert back.summary_model == "provider/summarizer"
+    assert back.summary_max_chars == 2_000
+    assert back.summary_decay_days == 90
+    assert back.summary_bootstrap_days == 14
+    assert back.summary_bootstrap_messages == 150
+    assert "context_messages = 25" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("field, value", [
+    ("context_messages", 9),
+    ("context_messages", 201),
+    ("open_channel_runs_per_hour", 0),
+    ("open_channel_runs_per_hour", 61),
+    ("summary_max_chars", 599),
+    ("summary_max_chars", 4_001),
+    ("summary_decay_days", 6),
+    ("summary_decay_days", 731),
+    ("summary_bootstrap_days", 0),
+    ("summary_bootstrap_days", 366),
+    ("summary_bootstrap_messages", -1),
+    ("summary_bootstrap_messages", 2_001),
+    ("summary_model", "bare-model"),
+])
+def test_open_channel_globals_out_of_range_rejected(tmp_path, field, value):
+    """Out-of-range globals fail both TOML load and in-memory save."""
+    import json as _json
+
+    path = tmp_path / "bad.toml"
+    path.write_text(
+        f'{field} = {_json.dumps(value)}\n'
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=field):
+        load_config(path)
+    # The same rejection protects an in-memory save (atomic write stays put).
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    before = path.read_bytes()
+    setattr(cfg, field, value)
+    with pytest.raises(ValueError, match=field):
+        save_config(cfg, path)
+    assert path.read_bytes() == before
+
+
+def test_summary_model_empty_uses_opencode_model():
+    """An empty summary_model is the supported 'same model' default."""
+    cfg = _valid_config()
+    cfg.summary_model = ""
+    validate_config(cfg)
+
+
+# --- P1: per-watch open_channels ------------------------------------------------
+
+
+def test_open_channels_parse_and_roundtrip(tmp_path):
+    """open_channels load onto their watch and survive save -> load."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        '[[watch]]\nguild_id = 222\nrepo_path = "/srv/repo"\n'
+        'allowed_channels = [333, 444]\n'
+        'open_channels = [333, 444]\n'
+        '[[watch]]\nchannel_id = 111\nrepo_path = "/srv/repo"\n'
+        'open_channels = [111]\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.watches[0].open_channels == [333, 444]
+    assert cfg.watches[1].open_channels == [111]
+    save_config(cfg, path)
+    back = load_config(path)
+    assert back.watches[0].open_channels == [333, 444]
+    assert back.watches[1].open_channels == [111]
+    assert "open_channels = [333, 444]" in path.read_text(encoding="utf-8")
+
+
+def test_open_channels_empty_not_written(tmp_path):
+    """A watch without open channels omits the key from saved TOML."""
+    cfg = _valid_config()
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    assert "open_channels" not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("watch_toml, message", [
+    # a reminder channel intercepts first: never an open channel
+    (
+        '[[watch]]\nchannel_id = 1\nrepo_path = "/repo"\nreminder_channel_id = 200\n'
+        '[[watch]]\nguild_id = 222\nrepo_path = "/repo"\nopen_channels = [200]\n',
+        "reminder_channel_id",
+    ),
+    # the same channel open on two watches
+    (
+        '[[watch]]\nguild_id = 222\nrepo_path = "/repo"\nopen_channels = [333]\n'
+        '[[watch]]\nguild_id = 223\nrepo_path = "/repo"\nopen_channels = [333]\n',
+        "duplicate open_channels",
+    ),
+    # an ignored channel can never be open
+    (
+        '[[watch]]\nguild_id = 222\nrepo_path = "/repo"\n'
+        'ignored_channels = [555]\nopen_channels = [555]\n',
+        "ignored_channels",
+    ),
+    # outside the allowlist
+    (
+        '[[watch]]\nguild_id = 222\nrepo_path = "/repo"\n'
+        'allowed_channels = [333]\nopen_channels = [444]\n',
+        "allowed_channels",
+    ),
+    # a channel watch may only open its own channel
+    (
+        '[[watch]]\nchannel_id = 111\nrepo_path = "/repo"\nopen_channels = [999]\n',
+        "own channel_id",
+    ),
+])
+def test_open_channels_refusals(tmp_path, watch_toml, message):
+    """Invalid open_channels configurations are refused at load."""
+    path = tmp_path / "bad.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n' + watch_toml,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=message):
+        load_config(path)
+
+
+def test_open_channels_non_positive_item_rejected(tmp_path):
+    """Non-positive open_channels entries fail at parse and at in-memory save."""
+    path = tmp_path / "bad.toml"
+    path.write_text(
+        f'opencode_binary = "{_binary()}"\n'
+        'opencode_model = "provider/model"\n'
+        '[[watch]]\nguild_id = 222\nrepo_path = "/repo"\nopen_channels = [0]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="positive"):
+        load_config(path)
+    cfg = _valid_config()
+    cfg.watches[0].open_channels = [-1]
+    with pytest.raises(ValueError, match="open_channels item must be a positive integer"):
+        save_config(cfg, tmp_path / "neg.toml")

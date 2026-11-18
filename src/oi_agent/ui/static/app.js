@@ -235,7 +235,7 @@ function updateWatchesFromGuilds() {
   document.querySelectorAll("#guilds input[type=checkbox]:checked").forEach((cb) => {
     const gid = cb.dataset.guild;
     if (!guildWatches.has(gid)) {
-      guildWatches.set(gid, { channel_id: 0, guild_id: Number(gid), repos: [], ignored_channels: [], allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3, reminder_channel_id: 0 });
+      guildWatches.set(gid, { channel_id: 0, guild_id: Number(gid), repos: [], ignored_channels: [], allowed_channels: [], open_channels: [], bot_user_id: 0, post_hourly_cap: 3, reminder_channel_id: 0 });
     }
   });
   const channelPicks = new Map();
@@ -248,7 +248,7 @@ function updateWatchesFromGuilds() {
   const next = [...guildWatches.values()];
   for (const [gid, channels] of channelPicks) {
     for (const cid of channels) {
-      next.push({ channel_id: cid, guild_id: 0, repos: [], ignored_channels: [], allowed_channels: [], bot_user_id: 0, post_hourly_cap: 3, reminder_channel_id: 0 });
+      next.push({ channel_id: cid, guild_id: 0, repos: [], ignored_channels: [], allowed_channels: [], open_channels: [], bot_user_id: 0, post_hourly_cap: 3, reminder_channel_id: 0 });
     }
   }
   state.watches = next;
@@ -457,8 +457,11 @@ const SETTINGS_FIELDS = [
   ["reply_delivery", "select:chunked,single_message"], ["opencode_binary", "text"],
   ["opencode_model", "text"], ["opencode_steps", "number"],
   ["opencode_timeout_seconds", "number"], ["write_mode", "select:read-only,docs-only"],
-  ["max_session_turns", "number"], ["session_ttl_days", "number"],
   ["max_context_messages", "number"], ["max_context_age_days", "number"],
+  ["context_messages", "number"], ["open_channel_runs_per_hour", "number"],
+  ["summary_model", "text"], ["summary_max_chars", "number"],
+  ["summary_decay_days", "number"], ["summary_bootstrap_days", "number"],
+  ["summary_bootstrap_messages", "number"],
   ["external_inputs", "select:disabled,read-only"],
   ["max_external_evidence_items", "number"], ["max_attachments", "number"],
   ["max_attachment_bytes", "number"], ["image_inputs", "select:off,on"],

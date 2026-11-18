@@ -45,6 +45,7 @@ class WatchTarget:
     repos: list[str] = field(default_factory=list)
     ignored_channels: list[int] = field(default_factory=list)
     allowed_channels: list[int] = field(default_factory=list)
+    open_channels: list[int] = field(default_factory=list)
 
     @property
     def repo_paths(self) -> list[str]:
@@ -103,10 +104,15 @@ class Config:
     environment_mode: str = "workstation"
     write_mode: str = "read-only"
     write_dirs: list[str] = field(default_factory=list)
-    max_session_turns: int = 30
-    session_ttl_days: int = 7
     max_context_messages: int = 200
     max_context_age_days: int = 30
+    context_messages: int = 40
+    open_channel_runs_per_hour: int = 6
+    summary_model: str = ""
+    summary_max_chars: int = 1_500
+    summary_decay_days: int = 60
+    summary_bootstrap_days: int = 30
+    summary_bootstrap_messages: int = 300
     external_inputs: str = "disabled"
     max_external_evidence_items: int = 8
     max_attachments: int = 4
@@ -313,10 +319,15 @@ def load_config(
         ),
         write_mode=_require_string(raw, "write_mode", "read-only"),
         write_dirs=_require_write_dirs(raw),
-        max_session_turns=_require_int(raw, "max_session_turns", 30),
-        session_ttl_days=_require_int(raw, "session_ttl_days", 7),
         max_context_messages=_require_int(raw, "max_context_messages", 200),
         max_context_age_days=_require_int(raw, "max_context_age_days", 30),
+        context_messages=_require_int(raw, "context_messages", 40),
+        open_channel_runs_per_hour=_require_int(raw, "open_channel_runs_per_hour", 6),
+        summary_model=_require_string(raw, "summary_model", ""),
+        summary_max_chars=_require_int(raw, "summary_max_chars", 1_500),
+        summary_decay_days=_require_int(raw, "summary_decay_days", 60),
+        summary_bootstrap_days=_require_int(raw, "summary_bootstrap_days", 30),
+        summary_bootstrap_messages=_require_int(raw, "summary_bootstrap_messages", 300),
         external_inputs=_require_string(raw, "external_inputs", "disabled"),
         max_external_evidence_items=_require_int(
             raw, "max_external_evidence_items", 8
@@ -344,6 +355,7 @@ def load_config(
         repos_list = _require_string_list(watch, "repos")
         ignored_list = _require_int_list(watch, "ignored_channels") or _require_int_list(watch, "ignore_channel_ids")
         allowed_list = _require_int_list(watch, "allowed_channels") or _require_int_list(watch, "allowed_channel_ids")
+        open_list = _require_int_list(watch, "open_channels")
 
         cfg.watches.append(
             WatchTarget(
@@ -359,6 +371,7 @@ def load_config(
                 repos=repos_list,
                 ignored_channels=ignored_list,
                 allowed_channels=allowed_list,
+                open_channels=open_list,
             )
         )
     validate_config(cfg)
@@ -391,6 +404,13 @@ def validate_config(cfg: Config) -> None:
             "opencode_model must use the exact provider/model format "
             f"(got {cfg.opencode_model!r})"
         )
+    if cfg.summary_model:
+        s_provider, s_separator, s_model = cfg.summary_model.partition("/")
+        if not s_separator or not s_provider.strip() or not s_model.strip():
+            raise ValueError(
+                "summary_model must use the exact provider/model format "
+                f"(got {cfg.summary_model!r}); leave it empty to use opencode_model"
+            )
     if _resolve_binary(cfg.opencode_binary) is None:
         raise ValueError(f"opencode_binary is not executable: {cfg.opencode_binary!r}")
     if cfg.reply_delivery not in REPLY_DELIVERY_MODES:
@@ -431,9 +451,14 @@ def validate_config(cfg: Config) -> None:
         if not norm or norm == "." or ".." in norm.split("/"):
             raise ValueError(f"write_dirs entries must be repo-relative without '..': {entry!r}")
     for name, minimum in (("max_reply_chars", 200), ("opencode_steps", 1),
-                          ("opencode_timeout_seconds", 1), ("max_session_turns", 1),
-                          ("session_ttl_days", 0), ("max_context_messages", 40),
+                          ("opencode_timeout_seconds", 1),
+                          ("max_context_messages", 40),
                           ("max_context_age_days", 1),
+                          ("open_channel_runs_per_hour", 1),
+                          ("summary_max_chars", 600),
+                          ("summary_decay_days", 7),
+                          ("summary_bootstrap_days", 1),
+                          ("summary_bootstrap_messages", 0),
                           ("max_external_evidence_items", 1), ("max_attachments", 0),
                           ("max_attachment_bytes", 1024)):
         value = getattr(cfg, name)
@@ -441,11 +466,20 @@ def validate_config(cfg: Config) -> None:
             raise ValueError(f"{name} must be an integer (got {value!r})")
         maximum = {"opencode_steps": 50, "opencode_timeout_seconds": 86_400,
                    "max_context_messages": 1_000, "max_context_age_days": 365,
+                   "open_channel_runs_per_hour": 60,
+                   "summary_max_chars": 4_000,
+                   "summary_decay_days": 730,
+                   "summary_bootstrap_days": 365,
+                   "summary_bootstrap_messages": 2_000,
                    "max_external_evidence_items": 50, "max_attachments": 16,
                    "max_attachment_bytes": 32 * 1024 * 1024}.get(name)
         if value < minimum or (maximum is not None and value > maximum):
             bound = f"[{minimum}, {maximum}]" if maximum else f">= {minimum}"
             raise ValueError(f"{name} must be in {bound} (got {value})")
+    if cfg.context_messages < 10 or cfg.context_messages > cfg.max_context_messages:
+        raise ValueError(
+            f"context_messages must be in [10, {cfg.max_context_messages}] (got {cfg.context_messages})"
+        )
     if cfg.reply_delivery == "single_message" and cfg.max_reply_chars > DISCORD_MAX_MESSAGE_CHARS:
         raise ValueError(
             "max_reply_chars must be <= 2000 when "
@@ -504,6 +538,30 @@ def validate_config(cfg: Config) -> None:
             if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
                 raise ValueError(f"allowed_channels item must be a positive integer (got {item!r})")
 
+        if not isinstance(target.open_channels, list):
+            raise ValueError(f"open_channels must be a list of positive integers (got {target.open_channels!r})")
+        for item in target.open_channels:
+            if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+                raise ValueError(f"open_channels item must be a positive integer (got {item!r})")
+        if not target.is_guild_watch:
+            foreign = [item for item in target.open_channels if item != target.channel_id]
+            if foreign:
+                raise ValueError(
+                    f"open_channels on a channel watch may only list the watch's own channel_id "
+                    f"{target.channel_id} (got {target.open_channels})"
+                )
+        else:
+            ignored_clash = sorted(set(target.open_channels) & set(target.ignored_channels))
+            if ignored_clash:
+                raise ValueError(f"open_channels entries are ignored_channels: {ignored_clash}")
+            if target.allowed_channels:
+                outside = sorted(set(target.open_channels) - set(target.allowed_channels))
+                if outside:
+                    raise ValueError(
+                        f"open_channels entries fall outside allowed_channels "
+                        f"{target.allowed_channels}: {outside}"
+                    )
+
         if (
             isinstance(target.post_hourly_cap, bool) or not isinstance(target.post_hourly_cap, int)
             or target.post_hourly_cap < 1
@@ -523,6 +581,18 @@ def validate_config(cfg: Config) -> None:
             if target.reminder_channel_id in seen_reminder_channels:
                 raise ValueError(f"duplicate reminder_channel_id {target.reminder_channel_id}")
             seen_reminder_channels.add(target.reminder_channel_id)
+
+    open_owner: dict[int, int] = {}
+    for target in cfg.watches:
+        owner = target.guild_id if target.is_guild_watch else target.channel_id
+        for item in target.open_channels:
+            if item in seen_reminder_channels:
+                raise ValueError(
+                    f"open_channels entry {item} is a reminder_channel_id; the reminder intercept runs first"
+                )
+            if item in open_owner:
+                raise ValueError(f"duplicate open_channels entry {item}: already open on watch {open_owner[item]}")
+            open_owner[item] = owner
 
 
 def cfg_default_db() -> str:
@@ -551,10 +621,15 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"environment_mode = {json.dumps(cfg.environment_mode)}",
         f"write_mode = {json.dumps(cfg.write_mode)}",
         f"write_dirs = {json.dumps(list(cfg.write_dirs))}",
-        f"max_session_turns = {cfg.max_session_turns}",
-        f"session_ttl_days = {cfg.session_ttl_days}",
         f"max_context_messages = {cfg.max_context_messages}",
         f"max_context_age_days = {cfg.max_context_age_days}",
+        f"context_messages = {cfg.context_messages}",
+        f"open_channel_runs_per_hour = {cfg.open_channel_runs_per_hour}",
+        f"summary_model = {json.dumps(cfg.summary_model)}",
+        f"summary_max_chars = {cfg.summary_max_chars}",
+        f"summary_decay_days = {cfg.summary_decay_days}",
+        f"summary_bootstrap_days = {cfg.summary_bootstrap_days}",
+        f"summary_bootstrap_messages = {cfg.summary_bootstrap_messages}",
         f"external_inputs = {json.dumps(cfg.external_inputs)}",
         f"max_external_evidence_items = {cfg.max_external_evidence_items}",
         f"max_attachments = {cfg.max_attachments}",
@@ -572,6 +647,8 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
                 lines.append(f"allowed_channels = {target.allowed_channels}")
         else:
             lines.append(f"channel_id = {target.channel_id}")
+        if target.open_channels:
+            lines.append(f"open_channels = {target.open_channels}")
 
         if len(target.repo_paths) > 1 or target.repos:
             lines.append(f"repos = {json.dumps(target.repo_paths)}")

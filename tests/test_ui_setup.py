@@ -352,6 +352,52 @@ async def test_save_unknown_key_rejected(wizard):
     assert "no_such_key" in data["error"]
 
 
+async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
+    """A dashboard save (GET then POST of the same payload) never resets the new keys."""
+    client = wizard.client
+    payload = {
+        "config": {
+            "personality": "quiet teammate",
+            "opencode_model": "stepfun/gpt-test",
+            "context_messages": 25,
+            "open_channel_runs_per_hour": 12,
+            "summary_model": "stepfun/gpt-test",
+            "summary_max_chars": 2_000,
+            "summary_decay_days": 90,
+            "summary_bootstrap_days": 14,
+            "summary_bootstrap_messages": 150,
+            "watches": [{
+                "guild_id": 100,
+                "repos": [str(wizard.repo)],
+                "allowed_channels": [1001, 1002],
+                "open_channels": [1001],
+            }],
+        },
+    }
+    response = await client.post("/api/save", json=payload)
+    assert (await response.json())["ok"] is True
+
+    shown = await client.get("/api/settings")
+    saved = (await shown.json())["config"]
+    assert saved["context_messages"] == 25
+    assert saved["open_channel_runs_per_hour"] == 12
+    assert saved["summary_model"] == "stepfun/gpt-test"
+    assert saved["summary_max_chars"] == 2_000
+    assert saved["watches"][0]["open_channels"] == [1001]
+
+    back = await client.post("/api/settings", json={"config": saved})
+    assert (await back.json())["ok"] is True
+
+    cfg = load_config(wizard.app["state"].config_path)
+    assert cfg.context_messages == 25
+    assert cfg.open_channel_runs_per_hour == 12
+    assert cfg.summary_model == "stepfun/gpt-test"
+    assert cfg.summary_decay_days == 90
+    assert cfg.summary_bootstrap_days == 14
+    assert cfg.summary_bootstrap_messages == 150
+    assert cfg.watches[0].open_channels == [1001]
+
+
 async def test_save_without_watches_rejected(wizard):
     response = await wizard.client.post("/api/save", json={
         "config": {"personality": "x"}, "discord_token": "",

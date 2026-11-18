@@ -1811,15 +1811,6 @@ class OIWatcher(discord.Client):
                     if fresh_requested:
                         self._store.clear_opencode_session(conversation_id, repo_path)
                         session_info = None
-                    elif session_info is not None:
-                        at_turn_cap = session_info["turns"] >= self._cfg.max_session_turns
-                        ttl_days = self._cfg.session_ttl_days
-                        expired = ttl_days > 0 and time.time() - session_info["updated_at"] >= ttl_days * 86400
-                        if at_turn_cap or expired:
-                            self._store.clear_opencode_session(conversation_id, repo_path)
-                            session_info = None
-                            reason = "turn limit reached" if at_turn_cap else "idle session expired"
-                            rotation_notice = f"Started a fresh session ({reason})."
                     session_id = session_info["session_id"] if session_info else None
                     prepared = await self._prepare_external(
                         question,
