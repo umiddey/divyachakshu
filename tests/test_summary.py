@@ -10,11 +10,11 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from oi_agent.summary import (
+    _SUMMARY_DATA_BEGIN,
+    _SUMMARY_DATA_END,
     SUMMARY_BATCH_MAX_CHARS,
     SUMMARY_BATCH_MAX_MESSAGES,
     SummaryLimits,
-    _SUMMARY_DATA_BEGIN,
-    _SUMMARY_DATA_END,
     build_summary_prompt,
     merge,
     plan_batches,
