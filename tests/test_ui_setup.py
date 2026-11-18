@@ -361,6 +361,7 @@ async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
             "opencode_model": "stepfun/gpt-test",
             "context_messages": 25,
             "open_channel_runs_per_hour": 12,
+            "open_channel_prompt": "personality",
             "summary_model": "stepfun/gpt-test",
             "summary_max_chars": 2_000,
             "summary_decay_days": 90,
@@ -373,6 +374,7 @@ async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
                 "repos": [str(wizard.repo)],
                 "allowed_channels": [1001, 1002],
                 "open_channels": [1001],
+                "open_channel_prompts": {"1001": "personality"},
             }],
         },
     }
@@ -386,6 +388,8 @@ async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
     assert saved["summary_model"] == "stepfun/gpt-test"
     assert saved["summary_max_chars"] == 2_000
     assert saved["watches"][0]["open_channels"] == [1001]
+    assert saved["open_channel_prompt"] == "personality"
+    assert saved["watches"][0]["open_channel_prompts"] == {"1001": "personality"}
     assert saved["harness"] == "opencode"
     assert saved["omp_binary"] == "omp"
 
@@ -402,6 +406,8 @@ async def test_settings_roundtrip_keeps_open_channel_keys(wizard):
     assert cfg.summary_bootstrap_days == 14
     assert cfg.summary_bootstrap_messages == 150
     assert cfg.watches[0].open_channels == [1001]
+    assert cfg.open_channel_prompt == "personality"
+    assert cfg.watches[0].open_channel_prompts == {1001: "personality"}
 
 
 async def test_save_without_watches_rejected(wizard):

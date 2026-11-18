@@ -902,7 +902,7 @@ def config_show(
         "reply_delivery", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "harness", "omp_binary", "environment_mode", "write_mode",
         "write_dirs", "max_context_messages", "max_context_age_days",
-        "context_messages", "open_channel_runs_per_hour", "summary_model",
+        "context_messages", "open_channel_runs_per_hour", "open_channel_prompt", "summary_model",
         "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
         "summary_bootstrap_messages",
         "external_inputs", "max_external_evidence_items", "max_attachments",
@@ -919,6 +919,8 @@ def config_show(
             filters.append(f"allowed={target.allowed_channels}")
         if target.open_channels:
             filters.append(f"open_channels={target.open_channels}")
+        if target.open_channel_prompts:
+            filters.append(f"open_channel_prompts={target.open_channel_prompts}")
         filter_str = f" ({', '.join(filters)})" if filters else ""
         reminder_str = f" | reminder-channel {target.reminder_channel_id}" if target.reminder_channel_id > 0 else ""
         console.print(
@@ -946,7 +948,7 @@ def config_set(
         "db_path", "opencode_binary", "opencode_model", "opencode_steps",
         "opencode_timeout_seconds", "harness", "omp_binary", "environment_mode", "write_mode",
         "write_dirs", "max_context_messages", "max_context_age_days",
-        "context_messages", "open_channel_runs_per_hour", "summary_model",
+        "context_messages", "open_channel_runs_per_hour", "open_channel_prompt", "summary_model",
         "summary_max_chars", "summary_decay_days", "summary_bootstrap_days",
         "summary_bootstrap_messages",
         "external_inputs", "max_external_evidence_items", "max_attachments",
@@ -977,6 +979,13 @@ def config_set(
         console.print(f"[red]invalid value for {key}: {exc}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]{key} = {value}[/green]")
+
+
+def _carry_open_channel_prompts(previous: WatchTarget | None, open_list: list[int]) -> dict[int, str]:
+    """Keep the previous watch's per-channel prompt overrides for channels that stay open."""
+    if previous is None:
+        return {}
+    return {k: v for k, v in previous.open_channel_prompts.items() if k in open_list}
 
 
 @config_app.command("watch-add")
@@ -1033,6 +1042,7 @@ def config_watch_add(
     # channels over so re-running watch-add cannot silently drop them.
     if not open_list and previous is not None:
         open_list = list(previous.open_channels)
+    open_prompts = _carry_open_channel_prompts(previous, open_list)
 
     cfg.watches.append(WatchTarget(
         channel_id=channel_id,
@@ -1045,6 +1055,7 @@ def config_watch_add(
         ignored_channels=ignored_list,
         allowed_channels=allowed_list,
         open_channels=open_list,
+        open_channel_prompts=open_prompts,
     ))
     try:
         save_config(cfg, config)
@@ -1119,6 +1130,7 @@ def config_open_channel_remove(
     for target in cfg.watches:
         if channel_id in target.open_channels:
             target.open_channels.remove(channel_id)
+            target.open_channel_prompts.pop(channel_id, None)
             found = True
     if not found:
         console.print(f"[red]channel {channel_id} is not open[/red]")
@@ -1129,6 +1141,33 @@ def config_open_channel_remove(
         console.print(f"[red]cannot close channel {channel_id}: {exc}[/red]")
         raise typer.Exit(1) from exc
     console.print(f"[green]channel {channel_id} is no longer open[/green]")
+
+
+@config_app.command("open-channel-prompt")
+def config_open_channel_prompt(
+    channel_id: int = typer.Argument(..., help="Open channel ID to set the prompt mode for"),
+    mode: str = typer.Argument(..., help="none, personality, or inherit (use the global open_channel_prompt)"),
+    config: Path = _DEFAULT_CONFIG_OPTION,
+) -> None:
+    """Set one open channel's prompt mode, overriding the global open_channel_prompt."""
+    if channel_id <= 0:
+        console.print("[red]channel ID must be a positive integer (> 0)[/red]")
+        raise typer.Exit(1)
+    cfg = _load_or_die(config)
+    target = next((t for t in cfg.watches if channel_id in t.open_channels), None)
+    if target is None:
+        console.print(f"[red]channel {channel_id} is not open[/red]")
+        raise typer.Exit(1)
+    if mode == "inherit":
+        target.open_channel_prompts.pop(channel_id, None)
+    else:
+        target.open_channel_prompts[channel_id] = mode
+    try:
+        save_config(cfg, config)
+    except ValueError as exc:
+        console.print(f"[red]cannot set prompt for channel {channel_id}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]channel {channel_id} prompt mode is now {mode}[/green]")
 
 
 @config_app.command("secret")

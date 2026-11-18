@@ -1829,3 +1829,60 @@ def test_daemon_uninstall_darwin_boots_out_and_removes_plist(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert not plist_path.exists()
     assert calls == [["launchctl", "bootout", "gui/501/ai.divyachakshu.oi"]]
+
+
+def test_open_channel_prompt_set_inherit_and_remove(tmp_path):
+    """open-channel-prompt sets and clears one channel's override; open-channel-remove drops it."""
+    cfg_path, _ = _watch_config(tmp_path)
+    result = runner.invoke(app, [
+        "config", "open-channel-add", "111", "--watch", "111", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, [
+        "config", "open-channel-prompt", "111", "personality", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).watches[0].open_channel_prompts == {111: "personality"}
+    result = runner.invoke(app, [
+        "config", "open-channel-prompt", "111", "inherit", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).watches[0].open_channel_prompts == {}
+    result = runner.invoke(app, [
+        "config", "open-channel-prompt", "111", "personality", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["config", "open-channel-remove", "111", "--config", str(cfg_path)])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).watches[0].open_channel_prompts == {}
+
+
+def test_open_channel_prompt_rejects_unknown_channel(tmp_path):
+    """open-channel-prompt only applies to a channel that is already open."""
+    cfg_path, _ = _watch_config(tmp_path)
+    result = runner.invoke(app, [
+        "config", "open-channel-prompt", "999", "personality", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 1
+
+
+def test_watch_add_keeps_open_channel_prompts(tmp_path):
+    """Re-running watch-add without --open-channels keeps per-channel prompt overrides."""
+    cfg_path, repo = _guild_watch_config(tmp_path, allowed="333,444")
+    result = runner.invoke(app, [
+        "config", "watch-add", "--guild-id", "222", "--repo-path", str(repo),
+        "--allowed-channels", "333,444", "--open-channels", "333",
+        "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, [
+        "config", "open-channel-prompt", "333", "personality", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, [
+        "config", "watch-add", "--guild-id", "222", "--repo-path", str(repo),
+        "--allowed-channels", "333,444",
+        "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).watches[0].open_channel_prompts == {333: "personality"}

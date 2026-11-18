@@ -254,6 +254,7 @@ _STR_FIELDS = (
     "discord_token_env", "db_path", "personality", "reply_delivery",
     "opencode_binary", "opencode_model", "environment_mode", "write_mode",
     "external_inputs", "image_inputs", "summary_model",
+    "open_channel_prompt",
     "harness", "omp_binary",
 )
 _INT_FIELDS = (
@@ -282,6 +283,7 @@ def watch_to_dict(wt) -> dict[str, Any]:
         "ignored_channels": list(wt.ignored_channels),
         "allowed_channels": list(wt.allowed_channels),
         "open_channels": list(wt.open_channels),
+        "open_channel_prompts": {str(k): v for k, v in wt.open_channel_prompts.items()},
         "bot_user_id": wt.bot_user_id,
         "post_hourly_cap": wt.post_hourly_cap,
         "reminder_channel_id": wt.reminder_channel_id,
@@ -337,6 +339,7 @@ def watch_from_payload(payload: Any):
         "channel_id", "guild_id", "repos", "ignored_channels",
         "allowed_channels", "open_channels", "bot_user_id",
         "post_hourly_cap", "reminder_channel_id",
+        "open_channel_prompts",
     }
     unknown = set(payload) - known
     if unknown:
@@ -351,10 +354,14 @@ def watch_from_payload(payload: Any):
         if not isinstance(raw, list):
             raise ValueError(f"{key} must be a list of integers")
         lists[key] = [_coerce_int({key: v}, key) for v in raw]
+    prompts = payload.get("open_channel_prompts", {})
+    if not isinstance(prompts, dict) or not all(isinstance(v, str) for v in prompts.values()):
+        raise ValueError("open_channel_prompts must be an object of channel id to mode string")
+    open_prompts = {_coerce_int({"open_channel_prompts": k}, "open_channel_prompts"): v for k, v in prompts.items()}
     repos = payload.get("repos", [])
     if not isinstance(repos, list) or not all(isinstance(r, str) for r in repos):
         raise ValueError("watch repos must be a list of strings")
-    return WatchTarget(repos=list(repos), **ints, **lists)
+    return WatchTarget(repos=list(repos), open_channel_prompts=open_prompts, **ints, **lists)
 
 
 # --------------------------------------------------------------------------

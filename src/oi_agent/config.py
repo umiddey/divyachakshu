@@ -14,6 +14,7 @@ DEFAULT_SECRETS_PATH = Path.home() / ".config" / "oi" / "secrets.env"
 DEFAULT_PERSONALITY = "Talk like a smart teammate in chat, not a report generator."
 REPLY_DELIVERY_MODES = ("chunked", "single_message")
 HARNESSES = ("opencode", "omp")
+OPEN_CHANNEL_PROMPT_MODES = ("none", "personality")
 ENVIRONMENT_MODES = ("workstation", "server")
 WRITE_MODES = ("read-only", "docs-only")
 DISCORD_MAX_MESSAGE_CHARS = 2_000
@@ -47,6 +48,7 @@ class WatchTarget:
     ignored_channels: list[int] = field(default_factory=list)
     allowed_channels: list[int] = field(default_factory=list)
     open_channels: list[int] = field(default_factory=list)
+    open_channel_prompts: dict[int, str] = field(default_factory=dict)
 
     @property
     def repo_paths(self) -> list[str]:
@@ -84,6 +86,10 @@ class WatchTarget:
 
         return True
 
+    def open_channel_prompt_for(self, channel_id: int, default: str) -> str:
+        """Return this channel's open-channel prompt mode, else the global default."""
+        return self.open_channel_prompts.get(channel_id, default)
+
 
 @dataclass
 class Config:
@@ -111,6 +117,7 @@ class Config:
     max_context_age_days: int = 30
     context_messages: int = 40
     open_channel_runs_per_hour: int = 6
+    open_channel_prompt: str = "none"
     summary_model: str = ""
     summary_max_chars: int = 1_500
     summary_decay_days: int = 60
@@ -245,6 +252,19 @@ def _require_write_dirs(container: dict) -> list[str]:
     return res
 
 
+def _require_open_channel_prompts(container: dict) -> dict[int, str]:
+    """Read the optional per-watch open_channel_prompts table (channel id -> mode)."""
+    raw = container.get("open_channel_prompts", {})
+    if not isinstance(raw, dict):
+        raise ValueError(f"open_channel_prompts must be a table of channel id to mode (got {raw!r})")
+    res: dict[int, str] = {}
+    for key, mode in raw.items():
+        if not (key.isdigit() and str(int(key)) == key and int(key) > 0):
+            raise ValueError(f"open_channel_prompts key must be a positive channel id (got {key!r})")
+        res[int(key)] = mode
+    return res
+
+
 def load_config(
     path: Path = DEFAULT_CONFIG_PATH,
     *,
@@ -328,6 +348,7 @@ def load_config(
         max_context_age_days=_require_int(raw, "max_context_age_days", 30),
         context_messages=_require_int(raw, "context_messages", 40),
         open_channel_runs_per_hour=_require_int(raw, "open_channel_runs_per_hour", 6),
+        open_channel_prompt=_require_string(raw, "open_channel_prompt", "none"),
         summary_model=_require_string(raw, "summary_model", ""),
         summary_max_chars=_require_int(raw, "summary_max_chars", 1_500),
         summary_decay_days=_require_int(raw, "summary_decay_days", 60),
@@ -361,6 +382,7 @@ def load_config(
         ignored_list = _require_int_list(watch, "ignored_channels") or _require_int_list(watch, "ignore_channel_ids")
         allowed_list = _require_int_list(watch, "allowed_channels") or _require_int_list(watch, "allowed_channel_ids")
         open_list = _require_int_list(watch, "open_channels")
+        prompts_map = _require_open_channel_prompts(watch)
 
         cfg.watches.append(
             WatchTarget(
@@ -377,6 +399,7 @@ def load_config(
                 ignored_channels=ignored_list,
                 allowed_channels=allowed_list,
                 open_channels=open_list,
+                open_channel_prompts=prompts_map,
             )
         )
     validate_config(cfg)
@@ -391,6 +414,25 @@ def _resolve_binary(binary: str) -> str | None:
     if expanded.is_file() and os.access(expanded, os.X_OK):
         return str(expanded.resolve())
     return shutil.which(binary)
+
+
+def _validate_open_channel_prompt_settings(cfg: Config) -> None:
+    """Check the global open-channel prompt mode and each per-watch override."""
+    if cfg.open_channel_prompt not in OPEN_CHANNEL_PROMPT_MODES:
+        raise ValueError(
+            f"open_channel_prompt must be one of {OPEN_CHANNEL_PROMPT_MODES!r} "
+            f"(got {cfg.open_channel_prompt!r})"
+        )
+    for target in cfg.watches:
+        for channel_id, mode in target.open_channel_prompts.items():
+            if isinstance(channel_id, bool) or not isinstance(channel_id, int) or channel_id <= 0:
+                raise ValueError(f"open_channel_prompts key must be a positive integer (got {channel_id!r})")
+            if channel_id not in target.open_channels:
+                raise ValueError(f"open_channel_prompts entry {channel_id} is not in that watch's open_channels")
+            if mode not in OPEN_CHANNEL_PROMPT_MODES:
+                raise ValueError(
+                    f"open_channel_prompts[{channel_id}] must be one of {OPEN_CHANNEL_PROMPT_MODES!r} (got {mode!r})"
+                )
 
 
 def validate_config(cfg: Config) -> None:
@@ -427,6 +469,7 @@ def validate_config(cfg: Config) -> None:
             f"reply_delivery must be one of {REPLY_DELIVERY_MODES!r} "
             f"(got {cfg.reply_delivery!r})"
         )
+    _validate_open_channel_prompt_settings(cfg)
     if cfg.environment_mode not in ENVIRONMENT_MODES:
         raise ValueError(
             f"environment_mode must be one of {ENVIRONMENT_MODES!r} "
@@ -609,6 +652,16 @@ def cfg_default_db() -> str:
     return "~/.local/state/oi/state.db"
 
 
+def _open_channel_prompts_lines(target: WatchTarget) -> list[str]:
+    """Render the per-watch open_channel_prompts override as one TOML inline table, if set."""
+    if not target.open_channel_prompts:
+        return []
+    pairs = ", ".join(
+        f"{json.dumps(str(k))} = {json.dumps(v)}" for k, v in sorted(target.open_channel_prompts.items())
+    )
+    return [f"open_channel_prompts = {{ {pairs} }}"]
+
+
 def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
     """Validate and atomically write an OpenCode-only TOML config.
 
@@ -636,6 +689,7 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"max_context_age_days = {cfg.max_context_age_days}",
         f"context_messages = {cfg.context_messages}",
         f"open_channel_runs_per_hour = {cfg.open_channel_runs_per_hour}",
+        f"open_channel_prompt = {json.dumps(cfg.open_channel_prompt)}",
         f"summary_model = {json.dumps(cfg.summary_model)}",
         f"summary_max_chars = {cfg.summary_max_chars}",
         f"summary_decay_days = {cfg.summary_decay_days}",
@@ -660,6 +714,7 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
             lines.append(f"channel_id = {target.channel_id}")
         if target.open_channels:
             lines.append(f"open_channels = {target.open_channels}")
+        lines.extend(_open_channel_prompts_lines(target))
 
         if len(target.repo_paths) > 1 or target.repos:
             lines.append(f"repos = {json.dumps(target.repo_paths)}")

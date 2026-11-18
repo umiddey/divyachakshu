@@ -542,6 +542,7 @@ def test_open_channel_globals_roundtrip(tmp_path):
     ("summary_bootstrap_messages", -1),
     ("summary_bootstrap_messages", 2_001),
     ("summary_model", "bare-model"),
+    ("open_channel_prompt", "chatty"),
 ])
 def test_open_channel_globals_out_of_range_rejected(tmp_path, field, value):
     """Out-of-range globals fail both TOML load and in-memory save."""
@@ -671,3 +672,35 @@ def test_open_channels_non_positive_item_rejected(tmp_path):
     cfg.watches[0].open_channels = [-1]
     with pytest.raises(ValueError, match="open_channels item must be a positive integer"):
         save_config(cfg, tmp_path / "neg.toml")
+
+
+def test_open_channel_prompt_defaults_to_none():
+    """Open-channel prompt mode defaults to none with no per-channel overrides."""
+    assert Config().open_channel_prompt == "none"
+    assert WatchTarget(channel_id=111, repo_path="/srv/repo").open_channel_prompts == {}
+
+
+def test_open_channel_prompt_roundtrip_and_resolution(tmp_path):
+    """Global mode and per-channel overrides survive a round-trip and resolve per channel."""
+    cfg = _valid_config()
+    cfg.open_channel_prompt = "personality"
+    cfg.watches[0].open_channels = [111]
+    cfg.watches[0].open_channel_prompts = {111: "personality"}
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    back = load_config(path)
+    assert back.open_channel_prompt == "personality"
+    target = back.watches[0]
+    assert target.open_channel_prompts == {111: "personality"}
+    assert target.open_channel_prompt_for(111, "none") == "personality"
+    assert target.open_channel_prompt_for(222, "none") == "none"
+
+
+@pytest.mark.parametrize("prompts", [{111: "chatty"}, {222: "personality"}])
+def test_open_channel_prompt_overrides_rejected(prompts):
+    """An override needs a known mode and must name one of the watch's open channels."""
+    cfg = _valid_config()
+    cfg.watches[0].open_channels = [111]
+    cfg.watches[0].open_channel_prompts = prompts
+    with pytest.raises(ValueError, match="open_channel_prompts"):
+        validate_config(cfg)
