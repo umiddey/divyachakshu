@@ -59,7 +59,7 @@ from .policy import (
     build_tool_free_agent,
     normalize_write_dirs,
 )
-from .prompt import FINAL_OUTPUT_MARKER, build_prompt, render_evidence_block
+from .prompt import FINAL_OUTPUT_MARKER, OPEN_CHANNEL_SILENT, build_prompt, render_evidence_block
 from .provenance import audit_sha, git_pull, mutation_warning, staleness_note, worktree_fingerprint
 from .review_snapshots import ReviewSnapshot, ReviewSnapshotError, materialized_review
 from .review_target import (
@@ -447,7 +447,15 @@ def _select_final_text_v2(
 
 
 def _extract_marked_answer(text: str) -> tuple[str, str | None]:
-    """Return text after the last explicit final-output marker."""
+    """Return text after the last explicit final-output marker.
+
+    A bare open-channel silence token (the model skipped the marker but said
+    exactly ``[[OI_SILENT]]``) is accepted as-is: it carries no content, and a
+    format-reminder retry would only repeat a full run to reach the same
+    "post nothing" verdict.
+    """
+    if text.strip() == OPEN_CHANNEL_SILENT:
+        return OPEN_CHANNEL_SILENT, None
     if FINAL_OUTPUT_MARKER not in text:
         return "", "protocol_missing_final_marker"
     answer = text.rsplit(FINAL_OUTPUT_MARKER, 1)[1].strip()

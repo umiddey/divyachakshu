@@ -392,3 +392,14 @@ async def test_failed_run_still_posts_when_trigger_addressed(tmp_path, monkeypat
     await asyncio.sleep(0.05)
 
     assert posted == ["(no response generated)"]
+
+
+def test_bare_silence_token_without_marker_is_accepted_not_retried():
+    """A model that says only the silence token skips the marker; no retry is needed."""
+    from oi_agent.opencode.runner import _extract_marked_answer
+
+    assert _extract_marked_answer(f"  {OPEN_CHANNEL_SILENT}\n") == (OPEN_CHANNEL_SILENT, None)
+    # Any other unmarked text is still a protocol failure.
+    assert _extract_marked_answer("hello there") == ("", "protocol_missing_final_marker")
+    # Silence mixed with other text without the marker is not silence.
+    assert _extract_marked_answer(f"ok {OPEN_CHANNEL_SILENT}") == ("", "protocol_missing_final_marker")
