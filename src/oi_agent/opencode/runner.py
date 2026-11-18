@@ -255,6 +255,9 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
         except asyncio.TimeoutError:
             pass
 
+# Default system prompt for raw (tool-free) prompts on either harness.
+RAW_SYSTEM_PROMPT = "You are a helpful JSON analysis agent. Output valid JSON."
+
 
 # Dict-derived error classes are embedded verbatim in Discord-bound failure
 # text (finding P1-2), so each candidate must be a bounded enum-like
@@ -917,6 +920,36 @@ class OpenCodeRunner:
                 len(prompt_bytes),
             )
             raise ValueError("prompt exceeds the bounded stdin limit")
+        if self._cfg.harness == "omp":
+            # Local import: omp.py imports this module's stream helpers.
+            from .omp import run_omp_prompt
+
+            return await run_omp_prompt(
+                self._cfg.omp_binary,
+                resolve_opencode_paths(tool="omp"),
+                prompt,
+                model=model or self._cfg.opencode_model,
+                system_prompt=system_prompt or RAW_SYSTEM_PROMPT,
+                timeout=timeout,
+            )
+        return await self._run_raw_opencode(
+            prompt,
+            system_prompt=system_prompt,
+            timeout=timeout,
+            steps=steps,
+            model=model,
+        )
+
+    async def _run_raw_opencode(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str,
+        timeout: int,
+        steps: int,
+        model: str,
+    ) -> str | None:
+        """Run the OpenCode tool-free raw prompt; the caller has size-checked it."""
         paths = resolve_opencode_paths()
         paths.ensure()
         try:
@@ -927,7 +960,7 @@ class OpenCodeRunner:
         requested_model = model or self._cfg.opencode_model
         agent_document = build_tool_free_agent(
             requested_model,
-            system_prompt or "You are a helpful JSON analysis agent. Output valid JSON.",
+            system_prompt or RAW_SYSTEM_PROMPT,
             steps=steps,
         )
         argv = [binary, *build_argv(requested_model, "oi_eval")]

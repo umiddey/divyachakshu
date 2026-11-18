@@ -77,17 +77,19 @@ class OpenCodePaths:
                     pass
 
 
-def resolve_opencode_paths(home: Path | None = None) -> OpenCodePaths:
+def resolve_opencode_paths(home: Path | None = None, tool: str = "opencode") -> OpenCodePaths:
     """Resolve the exact private roots shared by init, runtime, and daemon.
 
     Args:
         home: Service HOME; defaults to the current process HOME.
+        tool: Harness name owning the private root ("opencode" or "omp");
+            each harness keeps its own credential DB under a separate root.
 
     Returns:
         Isolated OpenCode filesystem roots.
     """
     root = (home or Path.home()).expanduser().resolve()
-    private = root / ".local" / "share" / "oi" / "opencode"
+    private = root / ".local" / "share" / "oi" / tool
     return OpenCodePaths(
         home=private / "home",
         config_home=private / "config",
