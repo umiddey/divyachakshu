@@ -42,8 +42,8 @@ from ..external.research import (
     fill_research_evidence,
     filter_outbound_urls,
     marker_retry_needed,
-    references_links,
     public_http_urls,
+    references_links,
 )
 from ..opencode.bootstrap import resolve_runtime_binary
 from ..opencode.paths import resolve_opencode_paths
@@ -61,7 +61,15 @@ from ..reminders import (
     tomorrow_at,
 )
 from ..store import Store
-from ..summary import render_summary
+from ..summary import (
+    SUMMARY_SYSTEM,
+    SummaryLimits,
+    build_summary_prompt,
+    merge,
+    plan_batches,
+    render_summary,
+    validate_output,
+)
 from .attachments import (
     context_attachments_requested,
     gather_candidates,
@@ -95,6 +103,9 @@ REMINDER_POLL_SECONDS = 60
 STORAGE_PRUNE_INTERVAL_SECONDS = 24 * 60 * 60
 # Documented bound for the in-memory reflection idempotence FIFO (finding B8).
 MAX_TRACKED_REFLECTION_DELIVERIES = 500
+# Bounded FIFO depth for pending post-delivery summary updates (mirror of the
+# reflection queue's bound; overflow drops the oldest pending update).
+SUMMARY_QUEUE_MAX_ITEMS = 32
 
 
 # Raw Discord user-mention markup (<@id> and <@!id> nickname form).
@@ -441,9 +452,15 @@ async def _collect_history(
     *,
     oldest_first: bool,
     after: datetime | None,
+    before: int | None = None,
 ) -> list[discord.Message]:
     """Collect one bounded history page, tolerating the fakes used in tests."""
-    history_iter = channel.history(limit=limit, oldest_first=oldest_first, after=after)
+    params: dict[str, Any] = {
+        "limit": limit, "oldest_first": oldest_first, "after": after,
+    }
+    if before is not None:
+        params["before"] = before
+    history_iter = channel.history(**params)
     if hasattr(history_iter, "__aiter__"):
         collected: list[discord.Message] = []
         async for message in history_iter:
@@ -452,6 +469,34 @@ async def _collect_history(
     if asyncio.iscoroutine(history_iter):
         return await history_iter
     return []
+
+
+async def _fetch_summary_candidates(
+    channel: discord.abc.Messageable,
+    limit: int,
+    before_id: int,
+) -> list[Any]:
+    """Read the bounded summary input: messages older than the reply window.
+
+    Prefers the ``_history`` test seam, otherwise one Discord history page
+    strictly before ``before_id``. Returns a chronological list of at most
+    ``limit`` messages; ``plan_batches`` applies the age and
+    ``last_summarized_message_id`` bounds on top of this page.
+    """
+    if limit <= 0 or before_id <= 0:
+        return []
+    if hasattr(channel, "_history"):
+        raw = [
+            m for m in getattr(channel, "_history", [])
+            if int(getattr(m, "id", 0) or 0) < before_id
+        ]
+        raw.sort(key=lambda m: int(getattr(m, "id", 0) or 0))
+        return raw[-limit:]
+    raw = await _collect_history(
+        channel, limit, oldest_first=False, after=None, before=before_id
+    )
+    raw.sort(key=lambda m: int(getattr(m, "id", 0) or 0))
+    return raw
 
 
 def _window_note(
@@ -543,6 +588,14 @@ class OIWatcher(discord.Client):
         self._active_conversation_tasks: dict[int, asyncio.Task] = {}
         self._reflection_queue: asyncio.Queue[tuple[str, str, str, str, str, str, str]] = asyncio.Queue(maxsize=32)
         self._reflection_worker_task: asyncio.Task | None = None
+        # Post-delivery rolling-summary updates: dedicated queue and single
+        # worker (one worker = serialized per conversation). Separate from the
+        # reflection queue because reflection items are fixed 7-tuples with
+        # drop-oldest semantics, while these are (conversation, window) pairs
+        # processed by different code.
+        self._summary_queue: asyncio.Queue[tuple[int, int]] = asyncio.Queue(maxsize=SUMMARY_QUEUE_MAX_ITEMS)
+        self._summary_worker_task: asyncio.Task | None = None
+        self._summary_dropped_count: int = 0
         # Bounded FIFO of delivery batch ids already enqueued for reflection
         # (process-local idempotence only; never persisted). Oldest entries are
         # evicted deterministically at MAX_TRACKED_REFLECTION_DELIVERIES.
@@ -701,6 +754,8 @@ class OIWatcher(discord.Client):
             self._worker_task = asyncio.create_task(self._durable_worker_loop())
         if self._reflection_worker_task is None or self._reflection_worker_task.done():
             self._reflection_worker_task = asyncio.create_task(self._reflection_worker_loop())
+        if self._summary_worker_task is None or self._summary_worker_task.done():
+            self._summary_worker_task = asyncio.create_task(self._summary_worker_loop())
         if any(t.reminder_channel_id > 0 for t in self._cfg.watches) and (
             self._reminder_task is None or self._reminder_task.done()
         ):
@@ -2047,6 +2102,11 @@ class OIWatcher(discord.Client):
                     is_silent_reply(reply.text) or (not reply.ok and not addressed)
                 ):
                     self._store.complete_jobs_silent(source_message_ids)
+                    self._enqueue_summary_update(
+                        conversation_id,
+                        context.messages[0].id if context.messages else 0,
+                        len(context.messages),
+                    )
                     return
                 reply_cap = self._cfg.max_reply_chars if self._cfg else 2000
                 response_text = reply.text
@@ -2140,6 +2200,14 @@ class OIWatcher(discord.Client):
                         reply_text=reply.text,
                         thread_excerpt=excerpt,
                     )
+                    # The reply is posted; the rolling summary may now catch
+                    # up on the messages that scrolled out of this run's
+                    # window, strictly off the reply path.
+                    self._enqueue_summary_update(
+                        conversation_id,
+                        context.messages[0].id if context.messages else 0,
+                        len(context.messages),
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2230,6 +2298,158 @@ class OIWatcher(discord.Client):
                 "[watcher] reflection queue full; dropped oldest (total dropped=%d)",
                 self._reflection_dropped_count,
             )
+
+    async def _summary_worker_loop(self) -> None:
+        """Process post-delivery summary updates sequentially, off the reply path.
+
+        One worker serializes every conversation's updates. On graceful
+        shutdown the worker keeps draining until the queue is empty like the
+        reflection worker; ``close()`` bounds the drain with a fixed timeout
+        and cancels the worker as the fallback so shutdown always terminates.
+        """
+        while True:
+            try:
+                if self._stopping:
+                    # Intake has stopped: drain what remains, then exit.
+                    item = self._summary_queue.get_nowait()
+                else:
+                    item = await asyncio.wait_for(self._summary_queue.get(), timeout=1.0)
+            except asyncio.QueueEmpty:
+                break
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
+            except asyncio.CancelledError:
+                break
+
+            conversation_id, window_oldest_id = item
+            try:
+                await self._update_conversation_summary(conversation_id, window_oldest_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[watcher] summary worker error: %s", type(exc).__name__)
+            finally:
+                self._summary_queue.task_done()
+
+    async def _update_conversation_summary(
+        self, conversation_id: int, window_oldest_id: int
+    ) -> None:
+        """Fold the messages that scrolled out of the reply window into the summary.
+
+        Reads at most ``summary_bootstrap_days``/``summary_bootstrap_messages``
+        of history older than ``window_oldest_id`` in chronological batches,
+        runs the tool-free summary model once per batch, and stores the
+        controller-merged document with the batch's newest message id. Any
+        failure keeps the previous summary; the reply is never touched here.
+        """
+        ch = self._channel_cache.get(conversation_id) or self.get_channel(conversation_id)
+        if ch is None:
+            try:
+                ch = await self.fetch_channel(conversation_id)
+                if ch is not None:
+                    self._channel_cache[conversation_id] = ch
+            except Exception:
+                return
+        target, owner_channel_id = self._resolve_target(conversation_id, ch)
+        if target is None:
+            return
+        open_channel = owner_channel_id in target.open_channels
+        rows = self._store.list_summaries(conversation_id)
+        last_summarized_id = rows[0]["last_summarized_message_id"] if rows else 0
+        now = datetime.now(timezone.utc)
+        candidates = await _fetch_summary_candidates(
+            ch, self._cfg.summary_bootstrap_messages, window_oldest_id
+        )
+        batches = plan_batches(
+            candidates,
+            self._cfg.summary_bootstrap_days,
+            self._cfg.summary_bootstrap_messages,
+            last_summarized_id,
+            now,
+        )
+        limits = SummaryLimits(
+            decay_days=self._cfg.summary_decay_days,
+            max_chars=self._cfg.summary_max_chars,
+        )
+        old_doc = self._store.get_summary(conversation_id)
+        model = self._cfg.summary_model or self._cfg.opencode_model
+        today = now.date()
+        for batch in batches:
+            # Each summary batch is one model run; open-channel summary runs
+            # count against open_channel_runs_per_hour like reply runs.
+            if open_channel:
+                self._record_open_run(owner_channel_id)
+            dates = [
+                m.created_at.date() for m in batch
+                if getattr(m, "created_at", None) is not None
+            ]
+            oldest_date = min(dates) if dates else today
+            newest_date = max(dates) if dates else today
+            prompt = build_summary_prompt(old_doc, batch)
+            try:
+                raw = await self._runner.run_raw_prompt(
+                    prompt, system_prompt=SUMMARY_SYSTEM, model=model
+                )
+            except ValueError:
+                logger.warning("[watcher] summary update failed class=prompt_too_large")
+                return
+            if raw is None:
+                logger.warning("[watcher] summary update failed class=runner_error")
+                return
+            items = validate_output(raw)
+            if items is None:
+                logger.warning("[watcher] summary update failed class=invalid_output")
+                return
+            new_doc = merge(old_doc, items, oldest_date, newest_date, today, limits)
+            newest_id = max(int(getattr(m, "id", 0) or 0) for m in batch)
+            try:
+                self._store.set_summary(
+                    conversation_id,
+                    new_doc,
+                    newest_id,
+                    max_chars=self._cfg.summary_max_chars,
+                )
+            except ValueError:
+                logger.warning("[watcher] summary update failed class=summary_store_reject")
+                return
+            old_doc = new_doc
+
+    def _enqueue_summary_update(
+        self, conversation_id: int, window_oldest_id: int, window_size: int
+    ) -> None:
+        """Queue one post-delivery summary update for the single worker.
+
+        Skipped when the reply window was shorter than ``context_messages``
+        (nothing has scrolled out of a window that did not fill). Bounded FIFO
+        like the reflection queue; on overflow the oldest pending update is
+        dropped because a later window always covers a strictly newer range.
+
+        Args:
+            conversation_id (int): Channel or thread snowflake id.
+            window_oldest_id (int): Oldest message id inside the reply window.
+            window_size (int): Number of messages the reply window contained.
+        """
+        if self._stopping:
+            return
+        if window_size < self._cfg.context_messages:
+            return
+        item = (conversation_id, window_oldest_id)
+        try:
+            self._summary_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            # Overload policy: drop the oldest pending update for the newest.
+            try:
+                self._summary_queue.get_nowait()
+                self._summary_queue.task_done()
+                self._summary_queue.put_nowait(item)
+            except Exception:
+                pass
+            self._summary_dropped_count += 1
+            logger.warning(
+                "[watcher] summary queue full; dropped oldest (total dropped=%d)",
+                self._summary_dropped_count,
+            )
+
     async def close(self) -> None:
         """Gracefully stop background worker tasks and close gateway connection.
 
@@ -2268,6 +2488,17 @@ class OIWatcher(discord.Client):
             self._reflection_worker_task.cancel()
             try:
                 await self._reflection_worker_task
+            except asyncio.CancelledError:
+                pass
+        if self._summary_worker_task is not None and not self._summary_worker_task.done():
+            # Same bounded drain-then-cancel shutdown as the reflection worker.
+            try:
+                await asyncio.wait_for(self._summary_queue.join(), timeout=2.0)
+            except (asyncio.TimeoutError, TimeoutError, Exception):
+                pass
+            self._summary_worker_task.cancel()
+            try:
+                await self._summary_worker_task
             except asyncio.CancelledError:
                 pass
         try:

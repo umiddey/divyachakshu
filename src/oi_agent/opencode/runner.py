@@ -881,6 +881,7 @@ class OpenCodeRunner:
         system_prompt: str = "",
         timeout: int = 60,
         steps: int = 1,
+        model: str = "",
     ) -> str | None:
         """Execute a raw model query with no tools at all.
 
@@ -895,6 +896,8 @@ class OpenCodeRunner:
             steps: Agent step budget. One step suffices for a direct JSON
                 answer; callers that may need a step after a denied tool
                 attempt (the web classifier) pass a larger bound.
+            model: Provider/model override; empty runs ``opencode_model``
+                (the summary worker passes ``summary_model`` here).
 
         Raises:
             ValueError: When the prompt exceeds the bounded stdin limit.
@@ -913,12 +916,13 @@ class OpenCodeRunner:
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return None
 
+        requested_model = model or self._cfg.opencode_model
         agent_document = build_tool_free_agent(
-            self._cfg.opencode_model,
+            requested_model,
             system_prompt or "You are a helpful JSON analysis agent. Output valid JSON.",
             steps=steps,
         )
-        argv = [binary, *build_argv(self._cfg.opencode_model, "oi_eval")]
+        argv = [binary, *build_argv(requested_model, "oi_eval")]
         environment = paths.environment()
         environment["OPENCODE_CONFIG_CONTENT"] = config_content(agent_document)
         db_path = native_db_path(paths.data_home)
