@@ -430,7 +430,7 @@ def _require_provider_model(model: str, field: str, suffix: str = "") -> None:
         raise ValueError(f"{field} must use the exact provider/model format (got {model!r}){suffix}")
 
 
-_FALLBACK_ID_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+_FALLBACK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:-]{0,99}")
 
 
 def _validate_open_channel_prompt_settings(cfg: Config) -> None:
@@ -474,8 +474,8 @@ def validate_config(cfg: Config) -> None:
         _require_provider_model(fb_model, "opencode_fallback_models entries")
         if not _FALLBACK_ID_RE.fullmatch(fb_model):
             raise ValueError(
-                "opencode_fallback_models entries may use only letters, digits, '.', '_', ':', '/', '-' "
-                f"(got {fb_model!r})"
+                "opencode_fallback_models entries may use only letters, digits, '.', '_', ':', '/', '-', "
+                f"must start with a letter or digit, and are capped at 100 characters (got {fb_model!r})"
             )
         if fb_model == cfg.opencode_model:
             raise ValueError(f"opencode_fallback_models must not repeat opencode_model (got {fb_model!r})")
@@ -486,6 +486,10 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"opencode_binary is not executable: {cfg.opencode_binary!r}")
     if cfg.harness not in HARNESSES:
         raise ValueError(f"harness must be one of {HARNESSES!r} (got {cfg.harness!r})")
+    if cfg.opencode_fallback_models and cfg.harness != "opencode":
+        raise ValueError(
+            f'opencode_fallback_models requires harness = "opencode" (got harness {cfg.harness!r})'
+        )
     if cfg.harness == "omp" and _resolve_binary(cfg.omp_binary) is None:
         raise ValueError(f"omp_binary is not executable: {cfg.omp_binary!r}")
     if cfg.reply_delivery not in REPLY_DELIVERY_MODES:

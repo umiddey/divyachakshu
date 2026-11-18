@@ -114,11 +114,23 @@ def test_fallback_chain_roundtrips_and_is_bounded(tmp_path):
         (["bare"], "exact provider/model format"),
         ([f"p/m{n}" for n in range(6)], "allows at most 5 entries"),
         (["other/bad id"], "may use only letters"),
+        (["-leading/one"], "may use only letters"),
+        ([".dot/one"], "may use only letters"),
+        (["p/" + "a" * 99], "capped at 100 characters"),
     )):
         cfg = _valid_config()
         cfg.opencode_fallback_models = models
         with pytest.raises(ValueError, match=match):
             save_config(cfg, tmp_path / f"bad-{index}.toml")
+
+
+def test_fallback_chain_requires_opencode_harness(tmp_path):
+    """A non-empty fallback chain is rejected unless harness is opencode."""
+    cfg = _valid_config()
+    cfg.opencode_fallback_models = ["other/one"]
+    cfg.harness = "omp"
+    with pytest.raises(ValueError, match='requires harness = "opencode"'):
+        save_config(cfg, tmp_path / "config.toml")
 
 
 def test_atomic_save_preserves_previous_bytes_on_validation_failure(tmp_path):
