@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026-11-20
+
+- New `omp_model` setting. With `harness = "omp"` it is the one model omp uses for every tool-free call (classifier, context-request fallback, summaries), so omp and OpenCode can sit on different providers. `opencode_model` keeps serving OpenCode repository replies. Empty keeps the old behavior (omp uses `opencode_model`, or `summary_model` for summaries). `oi doctor` checks `omp_model` against `omp models` when it is set.
+- `opencode_fallback_models` is now allowed with `harness = "omp"`, because repository replies still run on OpenCode.
+- Fix: an OpenCode `provider.rate-limit` error with no HTTP status (quota exhausted) now counts as a retryable provider error, so the fallback chain runs instead of the main answer failing.
+
 ## 0.2.1 - 2026-11-18
 
 - New `harness = "omp"` option. Tool-free prompts (classifier, context-request
