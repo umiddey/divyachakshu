@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 - 2026-11-20
+
+- Removed the `answered by <model>` line that was appended when a fallback model answered. Replies are posted as the model wrote them. `reply.model` and the log line still record the answering model.
+- Open channels: the minimal prompt now tells the model to open the repositories only when the message asks about their code or contents, instead of just listing them. A casual message no longer triggers a repo read.
+
 ## 0.2.2 - 2026-11-20
 
 - New `omp_model` setting. With `harness = "omp"` it is the one model omp uses for every tool-free call (classifier, context-request fallback, summaries), so omp and OpenCode can sit on different providers. `opencode_model` keeps serving OpenCode repository replies. Empty keeps the old behavior (omp uses `opencode_model`, or `summary_model` for summaries). `oi doctor` checks `omp_model` against `omp models` when it is set.

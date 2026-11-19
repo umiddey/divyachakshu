@@ -1649,8 +1649,6 @@ class OpenCodeRunner:
                 since_epoch=run_started,
             )
         footer = ""
-        if model != self._cfg.opencode_model and not is_silent_reply(text):
-            footer = f"\n\nanswered by {model}"
         return Reply(
             text=_bounded_text(text, self._cfg.max_reply_chars - len(footer)) + footer,
             sha=final_combined_sha,

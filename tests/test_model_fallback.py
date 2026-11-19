@@ -139,7 +139,7 @@ async def test_provider_error_moves_to_next_model(tmp_path, monkeypatch):
     """A 429 on the primary retries the next configured model, which answers."""
     reply, calls = await _run(tmp_path, monkeypatch, _config(), [_provider_error(429), _success()])
     assert reply.ok
-    assert reply.text == f"hello\n\nanswered by {FALLBACKS[0]}"
+    assert reply.text == "hello"
     assert reply.model == FALLBACKS[0]
     assert [c["model"] for c in calls] == [PRIMARY, FALLBACKS[0]]
 
@@ -222,12 +222,13 @@ async def test_provider_exhaustion_is_not_a_marker_retry(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_footer_fits_within_max_reply_chars(tmp_path, monkeypatch):
-    """The footer counts against the reply cap, so a long fallback answer still fits."""
+async def test_fallback_answer_carries_no_model_footer(tmp_path, monkeypatch):
+    """A fallback answer is posted as-is: no model name is appended, and the cap holds."""
     cfg = _config(max_reply_chars=200)
     reply, _ = await _run(tmp_path, monkeypatch, cfg, [_provider_error(429), _success("x" * 500)])
     assert len(reply.text) <= 200
-    assert reply.text.endswith(f"\n\nanswered by {FALLBACKS[0]}")
+    assert "answered by" not in reply.text
+    assert reply.model == FALLBACKS[0]
 
 
 @pytest.mark.asyncio
