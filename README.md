@@ -326,9 +326,13 @@ oi config set omp_binary omp     # default; set a path if omp is not on PATH
 oi doctor
 ```
 
-`oi doctor` lists the models omp can use in that private environment. It fails
-when `opencode_model` or `summary_model` is missing and prints the `omp login`
-command for that provider.
+Set `omp_model` (a `provider/model` id omp can use) when omp and OpenCode use
+different providers. It then covers every omp call and `opencode_model` stays
+the OpenCode model for repository replies. Empty means omp uses `opencode_model`
+(or `summary_model` for summaries). `oi doctor` lists the models omp can use in
+that private environment, fails when the omp model is missing, and prints the
+`omp login` command for that provider. `opencode_fallback_models` stays valid with
+omp, because repository replies still run on OpenCode.
 
 ## Troubleshooting
 

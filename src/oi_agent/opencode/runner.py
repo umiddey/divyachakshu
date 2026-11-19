@@ -973,7 +973,7 @@ class OpenCodeRunner:
                 self._cfg.omp_binary,
                 resolve_opencode_paths(tool="omp"),
                 prompt,
-                model=model or self._cfg.opencode_model,
+                model=self._cfg.omp_model or model or self._cfg.opencode_model,
                 system_prompt=system_prompt or RAW_SYSTEM_PROMPT,
                 timeout=timeout,
             )

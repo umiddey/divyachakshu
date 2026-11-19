@@ -255,7 +255,7 @@ _STR_FIELDS = (
     "opencode_binary", "opencode_model", "environment_mode", "write_mode",
     "external_inputs", "image_inputs", "summary_model",
     "open_channel_prompt",
-    "harness", "omp_binary",
+    "harness", "omp_binary", "omp_model",
 )
 _INT_FIELDS = (
     "max_reply_chars", "opencode_steps", "opencode_timeout_seconds",

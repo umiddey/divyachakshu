@@ -123,6 +123,17 @@ async def test_omp_subprocess_is_isolated_and_receives_prompt(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_omp_model_overrides_every_raw_model(tmp_path, monkeypatch):
+    """omp_model wins over opencode_model and per-call model overrides."""
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    binary, trace_path = _omp_script(tmp_path)
+    cfg = _config(binary, omp_model="anthropic/claude-haiku-5-5")
+    assert await OpenCodeRunner(cfg).run_raw_prompt("x", timeout=5, model="zai/other") == "ok"
+    argv = json.loads(trace_path.read_text(encoding="utf-8"))["argv"]
+    assert argv[argv.index("--model") + 1] == "anthropic/claude-haiku-5-5"
+
+
+@pytest.mark.asyncio
 async def test_omp_answer_requires_clean_stop_and_text(tmp_path, monkeypatch):
     """Exit 1, aborted stops, and blank text all fail closed to None."""
     monkeypatch.setenv("HOME", str(tmp_path / "operator"))

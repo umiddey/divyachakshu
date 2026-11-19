@@ -612,7 +612,8 @@ def _omp_model_failures(cfg: Config, home: Path | None) -> list[str]:
     if selectors is None:
         return [f"omp models could not be listed from: {cfg.omp_binary}"]
     failures = []
-    for model in dict.fromkeys([cfg.opencode_model, cfg.summary_model or cfg.opencode_model]):
+    models = [cfg.omp_model] if cfg.omp_model else [cfg.opencode_model, cfg.summary_model or cfg.opencode_model]
+    for model in dict.fromkeys(models):
         if model not in selectors:
             provider = model.partition("/")[0]
             failures.append(

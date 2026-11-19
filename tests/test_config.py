@@ -124,13 +124,20 @@ def test_fallback_chain_roundtrips_and_is_bounded(tmp_path):
             save_config(cfg, tmp_path / f"bad-{index}.toml")
 
 
-def test_fallback_chain_requires_opencode_harness(tmp_path):
-    """A non-empty fallback chain is rejected unless harness is opencode."""
+def test_omp_model_roundtrips_and_is_validated(tmp_path):
+    """omp_model round-trips, and a selector without a provider is rejected."""
     cfg = _valid_config()
-    cfg.opencode_fallback_models = ["other/one"]
     cfg.harness = "omp"
-    with pytest.raises(ValueError, match='requires harness = "opencode"'):
-        save_config(cfg, tmp_path / "config.toml")
+    cfg.omp_model = "anthropic/claude-haiku-5-5"
+    cfg.opencode_fallback_models = ["other/one"]
+    path = tmp_path / "config.toml"
+    save_config(cfg, path)
+    loaded = load_config(path)
+    assert loaded.omp_model == "anthropic/claude-haiku-5-5"
+    assert loaded.opencode_fallback_models == ["other/one"]
+    cfg.omp_model = "no-provider"
+    with pytest.raises(ValueError, match="omp_model"):
+        save_config(cfg, tmp_path / "bad.toml")
 
 
 def test_atomic_save_preserves_previous_bytes_on_validation_failure(tmp_path):

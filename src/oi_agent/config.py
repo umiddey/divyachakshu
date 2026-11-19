@@ -113,6 +113,7 @@ class Config:
     opencode_fallback_total_timeout_seconds: int = 0
     harness: str = "opencode"
     omp_binary: str = "omp"
+    omp_model: str = ""
     environment_mode: str = "workstation"
     write_mode: str = "read-only"
     write_dirs: list[str] = field(default_factory=list)
@@ -345,6 +346,7 @@ def load_config(
         ),
         harness=_require_string(raw, "harness", "opencode"),
         omp_binary=_require_string(raw, "omp_binary", "omp"),
+        omp_model=_require_string(raw, "omp_model", ""),
         environment_mode=(
             "workstation" if legacy_environment_mode
             else _require_string(raw, "environment_mode", "workstation")
@@ -486,10 +488,9 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"opencode_binary is not executable: {cfg.opencode_binary!r}")
     if cfg.harness not in HARNESSES:
         raise ValueError(f"harness must be one of {HARNESSES!r} (got {cfg.harness!r})")
-    if cfg.opencode_fallback_models and cfg.harness != "opencode":
-        raise ValueError(
-            f'opencode_fallback_models requires harness = "opencode" (got harness {cfg.harness!r})'
-        )
+    if cfg.omp_model:
+        _require_provider_model(cfg.omp_model, "omp_model",
+                                "; leave it empty to use opencode_model")
     if cfg.harness == "omp" and _resolve_binary(cfg.omp_binary) is None:
         raise ValueError(f"omp_binary is not executable: {cfg.omp_binary!r}")
     if cfg.reply_delivery not in REPLY_DELIVERY_MODES:
@@ -714,6 +715,7 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"opencode_fallback_total_timeout_seconds = {cfg.opencode_fallback_total_timeout_seconds}",
         f"harness = {json.dumps(cfg.harness)}",
         f"omp_binary = {json.dumps(cfg.omp_binary)}",
+        f"omp_model = {json.dumps(cfg.omp_model)}",
         f"environment_mode = {json.dumps(cfg.environment_mode)}",
         f"write_mode = {json.dumps(cfg.write_mode)}",
         f"write_dirs = {json.dumps(list(cfg.write_dirs))}",
