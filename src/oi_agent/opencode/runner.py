@@ -319,7 +319,14 @@ def _retry_class(error_class: str, events: list[dict[str, Any]]) -> str | None:
     if error_class == "timeout":
         return "timeout"
     errors = [event for event in events if event.get("type") == "error"]
-    return _provider_class(_provider_status(errors[-1])) if errors else None
+    if not errors:
+        return None
+    klass = _provider_class(_provider_status(errors[-1]))
+    if klass is None and error_class == "provider.rate-limit":
+        # Quota errors ("Weekly/Monthly Limit Exhausted") carry the structured
+        # type but no integer status; the type is an enum, never message text.
+        return "provider_rate_limited"
+    return klass
 
 
 # Pinned OpenCode ``run --format json`` event contract (verified against a

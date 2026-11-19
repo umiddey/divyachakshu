@@ -81,6 +81,17 @@ def test_message_text_never_counts_as_status() -> None:
     assert _retry_class("provider.internal", [event]) is None
 
 
+def test_quota_exhaustion_without_status_is_rate_limited() -> None:
+    # Real zai "Weekly/Monthly Limit Exhausted": type provider.rate-limit, no status.
+    event = {
+        "type": "error",
+        "error": {"type": "provider.rate-limit", "message": "Weekly/Monthly Limit Exhausted"},
+    }
+    assert _provider_status(event) is None
+    assert _retry_class("provider.rate-limit", [event]) == "provider_rate_limited"
+    assert _retry_class("provider.rate-limit", [event]) in RETRYABLE_CLASSES
+
+
 def test_timeout_class_is_retryable() -> None:
     assert "timeout" in RETRYABLE_CLASSES
     assert _retry_class("timeout", []) in RETRYABLE_CLASSES
