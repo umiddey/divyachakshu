@@ -2331,7 +2331,9 @@ class OIWatcher(discord.Client):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("[watcher] summary worker error: %s", type(exc).__name__)
+                logger.warning(
+                    "[watcher] summary worker error: %s", type(exc).__name__, exc_info=True
+                )
             finally:
                 self._summary_queue.task_done()
 

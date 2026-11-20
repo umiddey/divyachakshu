@@ -72,7 +72,7 @@ from .review_target import (
 
 logger = logging.getLogger(__name__)
 
-MAX_JSON_LINE_BYTES = 128 * 1024
+MAX_JSON_LINE_BYTES = 1024 * 1024
 MAX_STDOUT_BYTES = 2 * 1024 * 1024
 MAX_STDERR_BYTES = 32 * 1024
 # Bounded stdin (plan Phase 8 item 6): prompts above this size fail closed

@@ -288,7 +288,7 @@ elif behavior == "cli_missing_session":
 elif behavior == "empty":
     sys.exit(0)
 elif behavior == "large_line":
-    print("x" * (200 * 1024))
+    print("x" * (1100 * 1024))
 elif behavior == "timeout":
     time.sleep(10)
 else:

@@ -1,7 +1,7 @@
 """Tool-free single-prompt calls through omp, isolated in a private home.
 
-Only raw prompts (classifiers, summaries) may run here. Repository replies and
-research stay on OpenCode. Every call runs with ``--no-tools`` and no session,
+Raw prompts (classifiers, summaries) run here tool-free. Repository replies and
+research run through omp's agent path when ``harness = "omp"``. Every raw call runs with ``--no-tools`` and no session,
 extensions, skills, rules, or context files, so the model has no authority.
 """
 
