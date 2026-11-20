@@ -751,3 +751,34 @@ def test_open_channel_prompt_overrides_rejected(prompts):
     cfg.watches[0].open_channel_prompts = prompts
     with pytest.raises(ValueError, match="open_channel_prompts"):
         validate_config(cfg)
+
+
+def test_omp_fallback_models_round_trip(tmp_path):
+    """omp_fallback_models round-trips in order and defaults to empty."""
+    assert _valid_config().omp_fallback_models == []
+    cfg = _valid_config()
+    cfg.omp_model = "anthropic/claude-haiku-5-5"
+    cfg.omp_fallback_models = ["other/one", "other/two"]
+    path = tmp_path / "omp-fallback.toml"
+    save_config(cfg, path)
+    assert load_config(path).omp_fallback_models == ["other/one", "other/two"]
+
+
+def test_omp_fallback_models_rules(tmp_path):
+    """omp fallbacks follow the OpenCode list rules and never repeat the effective omp primary."""
+    cfg = _valid_config()
+    cfg.omp_model = "anthropic/claude-haiku-5-5"
+    for index, (models, match) in enumerate((
+        (["other/one", "other/one"], "must not repeat entries"),
+        (["anthropic/claude-haiku-5-5"], "must not repeat omp_model or opencode_model"),
+        (["bare"], "exact provider/model format"),
+        ([f"p/m{n}" for n in range(6)], "allows at most 5 entries"),
+        (["other/bad id"], "may use only letters"),
+    )):
+        cfg.omp_fallback_models = models
+        with pytest.raises(ValueError, match=match):
+            save_config(cfg, tmp_path / f"omp-bad-{index}.toml")
+    cfg.omp_model = ""
+    cfg.omp_fallback_models = ["provider/model"]
+    with pytest.raises(ValueError, match="must not repeat omp_model or opencode_model"):
+        save_config(cfg, tmp_path / "omp-bad-primary.toml")

@@ -300,3 +300,11 @@ class _IterPrompt:
             return next(self._answers)
         except StopIteration:
             pytest.fail("scripted init answers exhausted")
+
+
+async def test_ui_list_field_omp_fallback_models():
+    """The dashboard sends omp fallbacks as a JSON list, like the OpenCode chain."""
+    with pytest.raises(ValueError, match="omp_fallback_models must be a list of strings"):
+        ui_server.config_from_payload({"omp_fallback_models": "other/one"})
+    cfg = ui_server.config_from_payload({"omp_fallback_models": ["other/one"]})
+    assert cfg.omp_fallback_models == ["other/one"]

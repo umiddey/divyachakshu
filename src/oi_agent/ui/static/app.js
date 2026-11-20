@@ -458,6 +458,7 @@ const SETTINGS_FIELDS = [
   ["opencode_model", "text"], ["opencode_steps", "number"],
   ["opencode_timeout_seconds", "number"], ["write_mode", "select:read-only,docs-only"],
   ["opencode_fallback_models", "list"], ["opencode_fallback_total_timeout_seconds", "number"],
+  ["omp_fallback_models", "list"],
   ["max_context_messages", "number"], ["max_context_age_days", "number"],
   ["context_messages", "number"], ["open_channel_runs_per_hour", "number"],
   ["open_channel_prompt", "select:none,personality"],

@@ -1886,3 +1886,13 @@ def test_watch_add_keeps_open_channel_prompts(tmp_path):
     ])
     assert result.exit_code == 0, result.output
     assert cli.load_config(cfg_path).watches[0].open_channel_prompts == {333: "personality"}
+
+
+def test_config_set_omp_fallback_models(tmp_path):
+    """omp_fallback_models takes a comma list and is saved in order."""
+    cfg_path, _ = _watch_config(tmp_path)
+    result = runner.invoke(app, [
+        "config", "set", "omp_fallback_models", "other/one, other/two", "--config", str(cfg_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert cli.load_config(cfg_path).omp_fallback_models == ["other/one", "other/two"]

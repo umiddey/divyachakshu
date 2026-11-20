@@ -265,7 +265,7 @@ _INT_FIELDS = (
     "summary_bootstrap_days", "summary_bootstrap_messages",
     "max_external_evidence_items", "max_attachments", "max_attachment_bytes",
 )
-_LIST_FIELDS = ("write_dirs", "opencode_fallback_models")
+_LIST_FIELDS = ("write_dirs", "opencode_fallback_models", "omp_fallback_models")
 
 
 def config_to_dict(cfg: Config) -> dict[str, Any]:

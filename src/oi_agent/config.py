@@ -114,6 +114,7 @@ class Config:
     harness: str = "opencode"
     omp_binary: str = "omp"
     omp_model: str = ""
+    omp_fallback_models: list[str] = field(default_factory=list)
     environment_mode: str = "workstation"
     write_mode: str = "read-only"
     write_dirs: list[str] = field(default_factory=list)
@@ -347,6 +348,7 @@ def load_config(
         harness=_require_string(raw, "harness", "opencode"),
         omp_binary=_require_string(raw, "omp_binary", "omp"),
         omp_model=_require_string(raw, "omp_model", ""),
+        omp_fallback_models=_require_string_list(raw, "omp_fallback_models"),
         environment_mode=(
             "workstation" if legacy_environment_mode
             else _require_string(raw, "environment_mode", "workstation")
@@ -435,6 +437,25 @@ def _require_provider_model(model: str, field: str, suffix: str = "") -> None:
 _FALLBACK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:-]{0,99}")
 
 
+def _check_fallback_list(name: str, models: object, primary_name: str, primary: str) -> None:
+    """Validate an ordered fallback chain: strings, at most five, no repeats, never the primary."""
+    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+        raise ValueError(f"{name} must be a list of strings (got {models!r})")
+    if len(models) > 5:
+        raise ValueError(f"{name} allows at most 5 entries (got {len(models)})")
+    if len(set(models)) != len(models):
+        raise ValueError(f"{name} must not repeat entries (got {models!r})")
+    for model in models:
+        _require_provider_model(model, f"{name} entries")
+        if not _FALLBACK_ID_RE.fullmatch(model):
+            raise ValueError(
+                f"{name} entries may use only letters, digits, '.', '_', ':', '/', '-', "
+                f"must start with a letter or digit, and are capped at 100 characters (got {model!r})"
+            )
+        if model == primary:
+            raise ValueError(f"{name} must not repeat {primary_name} (got {model!r})")
+
+
 def _validate_open_channel_prompt_settings(cfg: Config) -> None:
     """Check the global open-channel prompt mode and each per-watch override."""
     if cfg.open_channel_prompt not in OPEN_CHANNEL_PROMPT_MODES:
@@ -465,22 +486,14 @@ def validate_config(cfg: Config) -> None:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
     _require_provider_model(cfg.opencode_model, "opencode_model")
-    fallbacks = cfg.opencode_fallback_models
-    if not isinstance(fallbacks, list) or not all(isinstance(m, str) for m in fallbacks):
-        raise ValueError(f"opencode_fallback_models must be a list of strings (got {fallbacks!r})")
-    if len(fallbacks) > 5:
-        raise ValueError(f"opencode_fallback_models allows at most 5 entries (got {len(fallbacks)})")
-    if len(set(fallbacks)) != len(fallbacks):
-        raise ValueError(f"opencode_fallback_models must not repeat entries (got {fallbacks!r})")
-    for fb_model in fallbacks:
-        _require_provider_model(fb_model, "opencode_fallback_models entries")
-        if not _FALLBACK_ID_RE.fullmatch(fb_model):
-            raise ValueError(
-                "opencode_fallback_models entries may use only letters, digits, '.', '_', ':', '/', '-', "
-                f"must start with a letter or digit, and are capped at 100 characters (got {fb_model!r})"
-            )
-        if fb_model == cfg.opencode_model:
-            raise ValueError(f"opencode_fallback_models must not repeat opencode_model (got {fb_model!r})")
+    _check_fallback_list(
+        "opencode_fallback_models", cfg.opencode_fallback_models,
+        "opencode_model", cfg.opencode_model,
+    )
+    _check_fallback_list(
+        "omp_fallback_models", cfg.omp_fallback_models,
+        "omp_model or opencode_model", cfg.omp_model or cfg.opencode_model,
+    )
     if cfg.summary_model:
         _require_provider_model(cfg.summary_model, "summary_model",
                                 "; leave it empty to use opencode_model")
@@ -712,6 +725,7 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"opencode_steps = {cfg.opencode_steps}",
         f"opencode_timeout_seconds = {cfg.opencode_timeout_seconds}",
         f"opencode_fallback_models = {json.dumps(list(cfg.opencode_fallback_models))}",
+        f"omp_fallback_models = {json.dumps(list(cfg.omp_fallback_models))}",
         f"opencode_fallback_total_timeout_seconds = {cfg.opencode_fallback_total_timeout_seconds}",
         f"harness = {json.dumps(cfg.harness)}",
         f"omp_binary = {json.dumps(cfg.omp_binary)}",
