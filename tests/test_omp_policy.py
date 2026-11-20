@@ -41,7 +41,7 @@ READ_ALLOWED = [
     ("read", {"path": "src/app.py:raw"}),
     ("read", {"path": "README.md;docs/a.md"}),
     ("grep", {"pattern": "x", "path": "src"}),
-    ("grep", {"pattern": "x"}),
+    ("grep", {"pattern": "x", "path": "README.md"}),
     ("glob", {"pattern": "*.md", "path": "docs"}),
 ]
 READ_DENIED = [
@@ -60,6 +60,13 @@ READ_DENIED = [
     ("grep", {"pattern": "x", "path": "/etc"}),
     ("grep", {"pattern": "x", "path": "../"}),
     ("glob", {"pattern": "../*.txt", "path": "."}),
+    ("grep", {"pattern": "x"}),
+    ("grep", {"pattern": "x", "path": "docs"}),
+    ("grep", {"pattern": "x", "path": "src", "glob": "*.env"}),
+    ("grep", {"pattern": "x", "path": "src", "include": "*token*"}),
+    ("grep", {"pattern": "x", "path": "src/*.py"}),
+    ("glob", {"pattern": "*secret*", "path": "."}),
+    ("glob", {"pattern": "*.md", "path": "docs", "glob": "*.pem"}),
     ("glob", {"pattern": "/etc/*", "path": "."}),
 ]
 DENIED_TOOLS = ["bash", "write", "task", "web_search", "mcp__brightdata_web_search_engine"]

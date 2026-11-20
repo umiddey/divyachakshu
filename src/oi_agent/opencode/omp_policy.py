@@ -33,6 +33,10 @@ _SELECTOR_SUFFIX = re.compile(r":(?:raw|img|conflicts|[-0-9lL,+.:]+)$")
 _GLOB_CHARS = ("*", "[")
 _HOST_NAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 _NON_PUBLIC_SUFFIXES = (".local", ".internal", ".localhost", ".arpa")
+# Entries a recursive grep scan may visit before the scope is denied.
+_SCAN_LIMIT = 20_000
+# Literal fragments of the secret patterns, for filters that may name them.
+_SECRET_KEYWORDS = tuple(sorted({p.strip("*/").split("/")[-1].strip("*") for p in _SECRET_PATTERNS} - {""}))
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,27 @@ def _public_http_url(url: str) -> bool:
     return ip.is_global
 
 
+def _names_secret(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _SECRET_KEYWORDS)
+
+
+def _secret_free_tree(root: Path, base: Path) -> bool:
+    """True when no entry under ``base`` (recursive) is secret-named.
+
+    grep returns file contents, so a recursive search over a tree that holds a
+    secret-named entry would expose it. The scan is bounded: a tree above
+    ``_SCAN_LIMIT`` entries is denied rather than partly checked.
+    """
+    scanned = 0
+    for dirpath, dirnames, filenames in os.walk(base):
+        for name in (*dirnames, *filenames):
+            scanned += 1
+            if scanned > _SCAN_LIMIT or _is_secret(os.path.relpath(os.path.join(dirpath, name), root)):
+                return False
+    return True
+
+
 def _read_like(policy: Policy, tool: str, tool_input: Mapping[str, Any]) -> tuple[bool, str]:
     default = "." if tool in ("grep", "glob") else None
     raw = tool_input.get("path", default)
@@ -159,9 +184,20 @@ def _read_like(policy: Policy, tool: str, tool_input: Mapping[str, Any]) -> tupl
         pattern = tool_input.get("pattern")
         if not isinstance(pattern, str) or pattern.startswith(("/", "~")) or ".." in pattern.split("/"):
             return False, "glob pattern is not allowed"
+    filters = [tool_input.get("glob"), tool_input.get("include")]
+    if tool == "glob":
+        filters.append(tool_input.get("pattern"))
+    if any(isinstance(item, str) and _names_secret(item) for item in filters):
+        return False, f"{tool} filter targets secret-named files"
     for part in raw.split(";"):
-        if _resolve_local(policy, part) is None:
+        located = _resolve_local(policy, part)
+        if located is None:
             return False, "path is outside the allowed roots or not allowed"
+        root, resolved, has_glob = located
+        if tool == "grep" and has_glob:
+            return False, "grep needs a literal path"
+        if tool == "grep" and resolved.is_dir() and not _secret_free_tree(root, resolved):
+            return False, "grep scope holds secret-named files or is too large"
     return True, ""
 
 
