@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ..store import Store
 
 from ..agent.reply import Reply
-from ..config import Config, WatchTarget
+from ..config import Config, WatchTarget, _resolve_binary
 from ..external.prepare import PreparedExternal
 from ..external.records import (
     STATUS_IMAGE,
@@ -1336,7 +1336,7 @@ class OpenCodeRunner:
         if not inputs.has_external_content:
             return _failure("none", "no_external_content")
         try:
-            binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
+            binary = self._agent_binary()
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return _failure("none", "binary_unavailable")
         # An external-evidence run must NOT skip review-reference resolution.
@@ -1398,14 +1398,10 @@ class OpenCodeRunner:
             open_channel_prompt=open_channel_prompt,
         )
 
-        disposable = DisposableNativeRoot()
+        disposable = await self._disposable_run_root(binary)
+        if disposable is None:
+            return _failure("none", "no_isolated_credentials")
         try:
-            target_db = await initialize_native_schema(binary, disposable)
-            copied = copy_isolated_credentials(
-                native_db_path(resolve_opencode_paths().data_home), target_db
-            )
-            if copied == 0:
-                return _failure("none", "no_isolated_credentials")
             (
                 events, stderr_bytes, stderr_sample, returncode,
                 error_class, duration_ms, completion,
@@ -1419,8 +1415,9 @@ class OpenCodeRunner:
                 write_dirs=[],
                 files=attachment_files,
                 disposable=disposable,
+                omp_mode="external",
             )
-            text, _session, event_error, text_parts = _select_final_text_v2(
+            text, _session, event_error, text_parts = self._select_answer(
                 events, completion
             )
             error_class = _merge_error_class(
@@ -1516,7 +1513,7 @@ class OpenCodeRunner:
             prompt += f"\n\nFORMAT REMINDER:\n{format_reminder}\n"
 
         try:
-            binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
+            binary = self._agent_binary()
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return _failure(combined_sha_prompt, "binary_unavailable")
         # Bounded stdin (finding B10): fail closed before spawning anything.
@@ -1567,7 +1564,7 @@ class OpenCodeRunner:
         )
 
         run_started = time.time()
-        models = [self._cfg.opencode_model, *self._cfg.opencode_fallback_models]
+        models = self._agent_models()
         # One wall budget for the whole chain. Attempt 0 keeps the configured
         # per-attempt timeout (a total of 0 means the same value).
         budget = (
@@ -1596,7 +1593,7 @@ class OpenCodeRunner:
                     timeout_seconds=min(self._cfg.opencode_timeout_seconds, remaining),
                 )
             )
-            text, returned_session, event_error, text_parts = _select_final_text_v2(
+            text, returned_session, event_error, text_parts = self._select_answer(
                 events, completion
             )
             error_class = _merge_error_class(
@@ -1657,6 +1654,55 @@ class OpenCodeRunner:
             model=model,
         )
 
+    def _agent_binary(self) -> str:
+        """Resolve the executable for the configured repo-reply harness."""
+        if self._cfg.harness == "omp":
+            resolved = _resolve_binary(self._cfg.omp_binary)
+            if resolved is None:
+                raise RuntimeError(f"omp binary is not executable: {self._cfg.omp_binary!r}")
+            return resolved
+        return resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
+
+    def _agent_models(self) -> list[str]:
+        """Return the attempt chain: omp gets one attempt; OpenCode keeps its fallbacks."""
+        if self._cfg.harness == "omp":
+            return [self._cfg.omp_model or self._cfg.opencode_model]
+        return [self._cfg.opencode_model, *self._cfg.opencode_fallback_models]
+
+    def _select_answer(
+        self, events: list[dict[str, Any]], completion: NativeCompletion
+    ) -> tuple[str, str | None, str | None, int]:
+        """Select the final answer with the selector for the configured harness."""
+        if self._cfg.harness == "omp":
+            from .omp import omp_select_text  # local: omp.py imports this module
+
+            return omp_select_text(events, completion)
+        return _select_final_text_v2(events, completion)
+
+    async def _disposable_run_root(self, binary: str) -> DisposableNativeRoot | None:
+        """Create the private root for one external or review run.
+
+        OpenCode needs native storage and copied credentials inside the root.
+        omp keeps its login in its own home, so under omp only the empty root
+        is created. Returns None when OpenCode has no credentials to copy; the
+        root is closed first in that case and on any setup error.
+        """
+        disposable = DisposableNativeRoot()
+        if self._cfg.harness == "omp":
+            return disposable
+        try:
+            target_db = await initialize_native_schema(binary, disposable)
+            copied = copy_isolated_credentials(
+                native_db_path(resolve_opencode_paths().data_home), target_db
+            )
+        except BaseException:
+            disposable.close()
+            raise
+        if copied == 0:
+            disposable.close()
+            return None
+        return disposable
+
     async def _execute_agent(
         self,
         *,
@@ -1670,6 +1716,7 @@ class OpenCodeRunner:
         files: list[Path] | None = None,
         disposable: DisposableNativeRoot | None = None,
         controller_snapshots: bool = False,
+        omp_mode: str = "repo",
         model: str | None = None,
         timeout_seconds: float | None = None,
     ) -> tuple[
@@ -1703,6 +1750,7 @@ class OpenCodeRunner:
                 :func:`build_permission_policy`).
             model: Model override; empty runs ``opencode_model``.
             timeout_seconds: Per-attempt timeout; None uses ``opencode_timeout_seconds``.
+            omp_mode: ``"repo"``, ``"review"``, or ``"external"``; selects the omp policy mode and cwd.
 
         Returns:
             ``(events, stderr_bytes, stderr_sample, returncode, error_class,
@@ -1713,6 +1761,31 @@ class OpenCodeRunner:
         timeout = (
             self._cfg.opencode_timeout_seconds if timeout_seconds is None else timeout_seconds
         )
+        if self._cfg.harness == "omp":
+            # Local import: omp.py imports this module's helpers at load time.
+            from .omp import run_omp_agent
+
+            if omp_mode == "external":
+                if disposable is None:
+                    raise RuntimeError("external omp runs require a disposable root")
+                cwd = disposable.base
+                roots = [disposable.base]
+            else:
+                cwd = root
+                roots = [root, *additional_roots]
+            return await run_omp_agent(
+                binary,
+                cwd=cwd,
+                roots=roots,
+                mode=omp_mode,
+                write_mode=write_mode,
+                write_dirs=None if write_dirs is None else list(write_dirs),
+                system_prompt=prompt_str,
+                prompt=prompt,
+                model=model or self._cfg.omp_model or self._cfg.opencode_model,
+                files=files or [],
+                timeout=timeout,
+            )
         agent_document = build_agent_config(
             requested_model,
             self._cfg.opencode_steps,
@@ -1888,7 +1961,7 @@ class OpenCodeRunner:
                 f"LATEST QUESTION:\n{question}"
             )
             try:
-                binary = resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
+                binary = self._agent_binary()
             except Exception:  # noqa: BLE001 - config/bootstrap boundary
                 return _review_failure("binary_unavailable", sha=provenance)
             # Bounded stdin: fail closed before spawning anything.
@@ -1918,17 +1991,8 @@ class OpenCodeRunner:
             disposable: DisposableNativeRoot | None = None
             files: list[Path] = []
             if prepared is not None:
-                disposable = DisposableNativeRoot()
-                try:
-                    target_db = await initialize_native_schema(binary, disposable)
-                    copied = copy_isolated_credentials(
-                        native_db_path(resolve_opencode_paths().data_home), target_db
-                    )
-                except BaseException:
-                    disposable.close()
-                    raise
-                if copied == 0:
-                    disposable.close()
+                disposable = await self._disposable_run_root(binary)
+                if disposable is None:
                     return _review_failure("no_isolated_credentials", sha=provenance)
                 files = review_attachment_files
             try:
@@ -1945,12 +2009,13 @@ class OpenCodeRunner:
                         files=files,
                         disposable=disposable,
                         controller_snapshots=True,
+                        omp_mode="review",
                     )
                 )
             finally:
                 if disposable is not None:
                     disposable.close()
-            text, _, event_error, text_parts = _select_final_text_v2(events, completion)
+            text, _, event_error, text_parts = self._select_answer(events, completion)
             error_class = _merge_error_class(
                 error_class, event_error, completion
             )

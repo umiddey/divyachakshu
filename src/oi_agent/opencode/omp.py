@@ -10,13 +10,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 from ..config import _resolve_binary
-from .paths import OpenCodePaths
-from .runner import _consume_jsonl, _consume_stderr, _terminate_process
+from .native import NativeCompletion
+from .omp_policy import mode_tools
+from .paths import OpenCodePaths, resolve_opencode_paths
+from .runner import _consume_jsonl, _consume_stderr, _ProtocolError, _terminate_process
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,11 @@ def _final_answer(events: list[dict[str, Any]]) -> str | None:
     return text if text.strip() else None
 
 
+OMP_POLICY_SHIM = Path(__file__).with_name("omp_policy.ts")
+POLICY_TIMEOUT_MS = 10_000
+AgentResult = tuple[list[dict[str, Any]], int, str, int | None, str | None, int, NativeCompletion]
+
+
 async def run_omp_prompt(
     cfg_binary: str,
     paths: OpenCodePaths,
@@ -108,17 +120,45 @@ async def run_omp_prompt(
         logger.warning("[omp] binary unavailable class=omp_binary_missing")
         return None
     paths.ensure()
+    try:
+        events, returncode, _, _ = await _collect(
+            omp_argv(binary, model, system_prompt, timeout),
+            paths.environment(),
+            paths.home,
+            prompt,
+            timeout,
+        )
+    except Exception as exc:
+        logger.warning("[omp] prompt failed class=%s", type(exc).__name__)
+        return None
+    if returncode != 0:
+        logger.warning("[omp] prompt failed class=omp_exit_%s", returncode)
+        return None
+    return _final_answer(events)
+
+
+async def _collect(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    prompt: str,
+    timeout: float,
+) -> tuple[list[dict[str, Any]], int | None, int, str]:
+    """Run one omp process; return ``(events, returncode, stderr_bytes, stderr_sample)``.
+
+    Any failure, timeout, or cancellation reaps the process group before it raises.
+    """
     process = None
     stdout_task = None
     stderr_task = None
     try:
         process = await asyncio.create_subprocess_exec(
-            *omp_argv(binary, model, system_prompt, timeout),
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=paths.environment(),
-            cwd=str(paths.home),
+            env=env,
+            cwd=str(cwd),
             start_new_session=(os.name == "posix"),
         )
         assert process.stdin is not None
@@ -132,22 +172,132 @@ async def run_omp_prompt(
             asyncio.gather(process.wait(), stdout_task, stderr_task),
             timeout=timeout,
         )
-        if process.returncode != 0:
-            logger.warning("[omp] prompt failed class=omp_exit_%s", process.returncode)
-            return None
         events, _ = stdout_task.result()
-        return _final_answer(events)
-    except asyncio.CancelledError:
+        stderr_bytes, stderr_sample = stderr_task.result()
+        return events, process.returncode, stderr_bytes, stderr_sample
+    except BaseException:
         # Cancellation must not orphan the start_new_session process group.
         if process is not None:
             await _terminate_process(process)
         raise
-    except Exception as exc:
-        logger.warning("[omp] prompt failed class=%s", type(exc).__name__)
-        if process is not None:
-            await _terminate_process(process)
-        return None
     finally:
         for task in (stdout_task, stderr_task):
             if task is not None and not task.done():
                 task.cancel()
+
+
+def _write_policy(directory: Path, policy: dict[str, Any]) -> Path:
+    """Write the decider's policy file, readable only by this user."""
+    path = directory / "policy.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(policy, handle)
+    return path
+
+
+def _agent_argv(
+    binary: str,
+    model: str,
+    system_prompt: str,
+    max_time: int,
+    tools: tuple[str, ...],
+    files: list[Path],
+) -> list[str]:
+    """Return the policy-gated argv: the shim is the only extension, tools are the mode allowlist."""
+    return [
+        binary, "-p", "--mode", "json",
+        "--model", model,
+        "--system-prompt", system_prompt,
+        "--max-time", str(max_time),
+        "--no-session", "--no-extensions", "--no-skills",
+        "--no-rules", "--no-context-files", "--no-title", "--no-lsp",
+        "-e", str(OMP_POLICY_SHIM),
+        "--tools", ",".join(tools),
+        "--approval-mode", "write",
+        *(f"@{path}" for path in files),
+    ]
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def _failed_agent(error_class: str, started: float) -> AgentResult:
+    return [], 0, "", None, error_class, _elapsed_ms(started), NativeCompletion(False, error_class)
+
+
+async def run_omp_agent(
+    binary: str,
+    *,
+    cwd: Path,
+    roots: list[Path],
+    mode: str,
+    write_mode: str,
+    write_dirs: list[str] | None,
+    system_prompt: str,
+    prompt: str,
+    model: str,
+    files: list[Path],
+    timeout: float,
+) -> AgentResult:
+    """Run one policy-gated omp reply and return the ``_execute_agent`` tuple shape.
+
+    Each tool call passes ``omp_policy.ts``, which fails closed. The policy file
+    is 0600 and lives in a temp dir removed on return.
+    """
+    started = time.monotonic()
+    if not OMP_POLICY_SHIM.is_file():
+        # Without the shim, --tools alone would leave read paths open.
+        return _failed_agent("policy_unavailable", started)
+    paths = resolve_opencode_paths(tool="omp")
+    paths.ensure()
+    max_time = max(1, math.ceil(timeout))
+    with tempfile.TemporaryDirectory(prefix="oi-omp-policy-") as scratch:
+        policy = _write_policy(
+            Path(scratch),
+            {
+                "python": sys.executable,
+                "timeout_ms": POLICY_TIMEOUT_MS,
+                "mode": mode,
+                "write_mode": write_mode,
+                "roots": [str(root.resolve()) for root in roots],
+                "cwd": str(cwd.resolve()),
+                "write_dirs": write_dirs,
+            },
+        )
+        env = paths.environment()
+        env["OI_OMP_POLICY"] = str(policy)
+        env["PI_EDIT_VARIANT"] = "replace"
+        argv = _agent_argv(binary, model, system_prompt, max_time, mode_tools(mode), files)
+        try:
+            events, returncode, stderr_bytes, stderr_sample = await _collect(
+                argv, env, cwd, prompt, timeout
+            )
+        except asyncio.TimeoutError:
+            return _failed_agent("timeout", started)
+        except _ProtocolError as exc:
+            return _failed_agent(exc.error_class, started)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            logger.warning("[omp] process boundary failed: %s", type(exc).__name__)
+            return _failed_agent("process_error", started)
+    error_class: str | None = None
+    if returncode != 0:
+        error_class = "nonzero_exit"
+    elif _final_answer(events) is None:
+        error_class = "empty_response"
+    completion = NativeCompletion(error_class is None, error_class)
+    return events, stderr_bytes, stderr_sample, returncode, error_class, _elapsed_ms(started), completion
+
+
+def omp_select_text(
+    events: list[dict[str, Any]],
+    completion: NativeCompletion,
+) -> tuple[str, str | None, str | None, int]:
+    """Return ``(text, session_id, error, text_parts)``, the ``_select_final_text_v2`` shape.
+
+    omp has no native session id, so the session slot is always None.
+    """
+    if not completion.completed:
+        return "", None, completion.error_class, 0
+    text = _final_answer(events) or ""
+    return text, None, None, 1 if text else 0

@@ -27,6 +27,13 @@ _MODE_TOOLS: dict[str, frozenset[str]] = {
     "external": frozenset({"read", "grep", "glob"}),
     "research": frozenset({"read", "web_search"}),
 }
+
+
+def mode_tools(mode: str) -> tuple[str, ...]:
+    """Return the sorted tool allowlist for one mode; unknown modes raise."""
+    return tuple(sorted(_MODE_TOOLS[mode]))
+
+
 _WRITE_MODES = ("read-only", "docs-only")
 # Trailing selectors that read strips before resolving: ``:50-100``, ``:raw``, ...
 _SELECTOR_SUFFIX = re.compile(r":(?:raw|img|conflicts|[-0-9lL,+.:]+)$")
