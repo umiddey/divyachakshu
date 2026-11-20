@@ -224,12 +224,14 @@ async def test_open_channel_own_message_never_admitted(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fifth_consecutive_bot_turn_not_admitted_human_resets(tmp_path, monkeypatch):
-    """Four consecutive bot turns run; the fifth is refused until a human writes."""
-    watcher = make_watcher(tmp_path, open_channels=(111,), post_hourly_cap=20)
+async def test_bot_turn_past_cap_not_admitted_human_resets(tmp_path, monkeypatch):
+    """Turns up to the cap run; the next one is refused until a human writes."""
+    cap = 3
+    watcher = make_watcher(tmp_path, open_channels=(111,), post_hourly_cap=cap + 10)
+    watcher._cfg.open_channel_max_bot_turns = cap
     channel = FakeChannel(111)
     bot = FakeAuthor(55, "otherbot", bot=True)
-    for i in range(1, 6):
+    for i in range(1, cap + 2):
         message = FakeMessage(i, channel, bot, f"bot chatter {i}", [])
         channel._history.append(message)
         await watcher.on_message(message)
@@ -237,10 +239,10 @@ async def test_fifth_consecutive_bot_turn_not_admitted_human_resets(tmp_path, mo
     admitted = watcher._store._conn.execute(
         "SELECT source_message_id FROM mention_jobs ORDER BY source_message_id"
     ).fetchall()
-    assert [r[0] for r in admitted] == [1, 2, 3, 4]
-    assert watcher._open_bot_streak[111] == 5
+    assert [r[0] for r in admitted] == list(range(1, cap + 1))
+    assert watcher._open_bot_streak[111] == cap + 1
 
-    human = FakeMessage(6, channel, FakeAuthor(7), "ok humans are back", [])
+    human = FakeMessage(cap + 2, channel, FakeAuthor(7), "ok humans are back", [])
     channel._history.append(human)
     await watcher.on_message(human)
 
@@ -248,7 +250,7 @@ async def test_fifth_consecutive_bot_turn_not_admitted_human_resets(tmp_path, mo
     admitted = watcher._store._conn.execute(
         "SELECT source_message_id FROM mention_jobs ORDER BY source_message_id"
     ).fetchall()
-    assert [r[0] for r in admitted] == [1, 2, 3, 4, 6]
+    assert [r[0] for r in admitted] == [*range(1, cap + 1), cap + 2]
 
 
 @pytest.mark.asyncio

@@ -85,11 +85,8 @@ logger = logging.getLogger(__name__)
 # whole up to here; longer bodies are clipped WITH an explicit marker naming
 # both lengths, never silently truncated.
 HISTORY_LINE_MAX_CHARS = 4000
+# Built-in quiet period; config `burst_quiet_seconds` overrides it when > 0.
 BURST_QUIET_SECONDS = 8.0
-# Open channels admit plain conversation, including other bots' traffic. A run
-# of consecutive bot turns is capped so two chatty agents cannot loop forever;
-# any human message resets the count.
-OPEN_CHANNEL_MAX_BOT_TURNS = 4
 
 # Upper bound on the names the addressee gate inspects for other members.
 _GATE_OTHER_NAMES_LIMIT = 32
@@ -647,7 +644,7 @@ class OIWatcher(discord.Client):
         Open channels admit every human message; OI never answers itself (the
         author is this bot's account or the watch's ``bot_user_id``), and a
         bot turn is admitted only while the consecutive-bot-turn streak stays
-        within ``OPEN_CHANNEL_MAX_BOT_TURNS``. Any human message resets the
+        within ``open_channel_max_bot_turns``. Any human message resets the
         streak. The explicit-trigger gate is not consulted: open mode reads
         plain conversation by design.
 
@@ -669,7 +666,7 @@ class OIWatcher(discord.Client):
         if own_author:
             return False
         if author_is_bot:
-            return streak + 1 <= OPEN_CHANNEL_MAX_BOT_TURNS
+            return streak + 1 <= self._cfg.open_channel_max_bot_turns
         return True
 
     def _repo_lock(self, repo_path: str | Path) -> asyncio.Lock:
@@ -1803,7 +1800,8 @@ class OIWatcher(discord.Client):
             while True:
                 last_event = self._conversation_last_event.get(conversation_id, 0.0)
                 elapsed = time.time() - last_event
-                remaining = BURST_QUIET_SECONDS - elapsed
+                quiet = self._cfg.burst_quiet_seconds or BURST_QUIET_SECONDS
+                remaining = quiet - elapsed
                 if remaining <= 0:
                     break
                 await asyncio.sleep(min(remaining, 1.0))

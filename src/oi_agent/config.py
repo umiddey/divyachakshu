@@ -122,6 +122,8 @@ class Config:
     max_context_age_days: int = 30
     context_messages: int = 40
     open_channel_runs_per_hour: int = 6
+    burst_quiet_seconds: int = 0
+    open_channel_max_bot_turns: int = 40
     open_channel_prompt: str = "none"
     summary_model: str = ""
     summary_max_chars: int = 1_500
@@ -359,6 +361,8 @@ def load_config(
         max_context_age_days=_require_int(raw, "max_context_age_days", 30),
         context_messages=_require_int(raw, "context_messages", 40),
         open_channel_runs_per_hour=_require_int(raw, "open_channel_runs_per_hour", 6),
+        burst_quiet_seconds=_require_int(raw, "burst_quiet_seconds", 0),
+        open_channel_max_bot_turns=_require_int(raw, "open_channel_max_bot_turns", 40),
         open_channel_prompt=_require_string(raw, "open_channel_prompt", "none"),
         summary_model=_require_string(raw, "summary_model", ""),
         summary_max_chars=_require_int(raw, "summary_max_chars", 1_500),
@@ -550,6 +554,8 @@ def validate_config(cfg: Config) -> None:
                           ("max_context_messages", 40),
                           ("max_context_age_days", 1),
                           ("open_channel_runs_per_hour", 1),
+                          ("burst_quiet_seconds", 0),
+                          ("open_channel_max_bot_turns", 1),
                           ("summary_max_chars", 600),
                           ("summary_decay_days", 7),
                           ("summary_bootstrap_days", 1),
@@ -563,6 +569,8 @@ def validate_config(cfg: Config) -> None:
                    "opencode_fallback_total_timeout_seconds": 86_400,
                    "max_context_messages": 1_000, "max_context_age_days": 365,
                    "open_channel_runs_per_hour": 60,
+                   "burst_quiet_seconds": 300,
+                   "open_channel_max_bot_turns": 1_000,
                    "summary_max_chars": 4_000,
                    "summary_decay_days": 730,
                    "summary_bootstrap_days": 365,
@@ -737,6 +745,8 @@ def save_config(cfg: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
         f"max_context_age_days = {cfg.max_context_age_days}",
         f"context_messages = {cfg.context_messages}",
         f"open_channel_runs_per_hour = {cfg.open_channel_runs_per_hour}",
+        f"burst_quiet_seconds = {cfg.burst_quiet_seconds}",
+        f"open_channel_max_bot_turns = {cfg.open_channel_max_bot_turns}",
         f"open_channel_prompt = {json.dumps(cfg.open_channel_prompt)}",
         f"summary_model = {json.dumps(cfg.summary_model)}",
         f"summary_max_chars = {cfg.summary_max_chars}",

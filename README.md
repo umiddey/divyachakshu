@@ -177,6 +177,8 @@ replacement. Defaults:
 | `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
 | `context_messages` | `40` (10–`max_context_messages`) | Newest messages shown to the model alongside the rolling summary. |
 | `open_channel_runs_per_hour` | `6` (1–60) | Model-run cap per open channel per hour; over the cap, jobs are deferred. |
+| `burst_quiet_seconds` | `0` (0–300; 0 = built-in 8) | Quiet period before a burst of messages in one conversation is read as one run; each new message restarts it. |
+| `open_channel_max_bot_turns` | `40` (1–1000) | Consecutive bot messages (OI's own included) an open channel follows before a human must speak. |
 | `open_channel_prompt` | `none` | Prompt mode for open channels: `none` (plumbing only) or `personality` (plumbing plus the `personality` text). Per-channel overrides: see Open channels. |
 | `summary_model` | `` (empty = `opencode_model`) | Model used for summary runs. |
 | `summary_max_chars` | `1500` (600–4000) | Rendered rolling-summary size cap. |
@@ -254,7 +256,8 @@ What the model sees in an open channel is set by `open_channel_prompt` (default 
 
 Caps keep loops and costs bounded:
 
-- Another bot (or OI itself) is followed for at most 4 consecutive turns;
+- Another bot (or OI itself) is followed for at most `open_channel_max_bot_turns`
+  consecutive turns (default 40);
   any human message resets the count.
 - Each open channel runs at most `open_channel_runs_per_hour` model runs per
   hour (default 6); over the cap, jobs are deferred, not dropped. Summary

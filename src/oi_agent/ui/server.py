@@ -261,7 +261,8 @@ _INT_FIELDS = (
     "max_reply_chars", "opencode_steps", "opencode_timeout_seconds",
     "opencode_fallback_total_timeout_seconds",
     "max_context_messages", "max_context_age_days", "context_messages",
-    "open_channel_runs_per_hour", "summary_max_chars", "summary_decay_days",
+    "open_channel_runs_per_hour", "burst_quiet_seconds", "open_channel_max_bot_turns",
+    "summary_max_chars", "summary_decay_days",
     "summary_bootstrap_days", "summary_bootstrap_messages",
     "max_external_evidence_items", "max_attachments", "max_attachment_bytes",
 )

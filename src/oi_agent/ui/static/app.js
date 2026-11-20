@@ -461,6 +461,7 @@ const SETTINGS_FIELDS = [
   ["omp_fallback_models", "list"],
   ["max_context_messages", "number"], ["max_context_age_days", "number"],
   ["context_messages", "number"], ["open_channel_runs_per_hour", "number"],
+  ["burst_quiet_seconds", "number"], ["open_channel_max_bot_turns", "number"],
   ["open_channel_prompt", "select:none,personality"],
   ["summary_model", "text"], ["summary_max_chars", "number"],
   ["summary_decay_days", "number"], ["summary_bootstrap_days", "number"],

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- New `burst_quiet_seconds` setting (0–300; 0 keeps the built-in 8 s): how long a conversation must stay quiet before its burst of messages is read as one run. Raise it so back-to-back bot posts land in the same run.
+- New `open_channel_max_bot_turns` setting (1-1000, default 40): consecutive bot
+  messages an open channel follows before a human must speak. It replaces the
+  fixed limit of 4.
+
 ## 0.3.1 - 2026-11-20
 
 - New `omp_fallback_models` setting: an ordered list of `provider/model` ids tried after `omp_model` (or `opencode_model`) for repository replies under `harness = "omp"`. A provider error (429, 502, 503, 504, other 5xx) or a timeout on one model runs the same request on the next. Replies carry no model footer; `reply.model` and the log line record the answering model. Non-retryable errors such as 400 do not fall back. Empty keeps one attempt.

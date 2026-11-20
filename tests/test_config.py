@@ -545,6 +545,7 @@ def test_open_channel_globals_defaults():
     cfg = Config()
     assert cfg.context_messages == 40
     assert cfg.open_channel_runs_per_hour == 6
+    assert cfg.open_channel_max_bot_turns == 40
     assert cfg.summary_model == ""
     assert cfg.summary_max_chars == 1_500
     assert cfg.summary_decay_days == 60
@@ -557,6 +558,8 @@ def test_open_channel_globals_roundtrip(tmp_path):
     cfg = _valid_config()
     cfg.context_messages = 25
     cfg.open_channel_runs_per_hour = 12
+    cfg.burst_quiet_seconds = 20
+    cfg.open_channel_max_bot_turns = 7
     cfg.summary_model = "provider/summarizer"
     cfg.summary_max_chars = 2_000
     cfg.summary_decay_days = 90
@@ -567,6 +570,8 @@ def test_open_channel_globals_roundtrip(tmp_path):
     back = load_config(path)
     assert back.context_messages == 25
     assert back.open_channel_runs_per_hour == 12
+    assert back.burst_quiet_seconds == 20
+    assert back.open_channel_max_bot_turns == 7
     assert back.summary_model == "provider/summarizer"
     assert back.summary_max_chars == 2_000
     assert back.summary_decay_days == 90
@@ -580,6 +585,10 @@ def test_open_channel_globals_roundtrip(tmp_path):
     ("context_messages", 201),
     ("open_channel_runs_per_hour", 0),
     ("open_channel_runs_per_hour", 61),
+    ("open_channel_max_bot_turns", 0),
+    ("open_channel_max_bot_turns", 1_001),
+    ("burst_quiet_seconds", -1),
+    ("burst_quiet_seconds", 301),
     ("summary_max_chars", 599),
     ("summary_max_chars", 4_001),
     ("summary_decay_days", 6),
