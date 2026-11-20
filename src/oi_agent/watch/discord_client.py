@@ -456,7 +456,7 @@ async def _collect_history(
         "limit": limit, "oldest_first": oldest_first, "after": after,
     }
     if before is not None:
-        params["before"] = before
+        params["before"] = discord.Object(id=before)
     history_iter = channel.history(**params)
     if hasattr(history_iter, "__aiter__"):
         collected: list[discord.Message] = []

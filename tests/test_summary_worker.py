@@ -388,3 +388,26 @@ async def test_worker_cancelled_cleanly_on_shutdown(tmp_path, monkeypatch):
     await asyncio.wait_for(watcher.close(), timeout=10)
     assert watcher._summary_worker_task.done()
     assert watcher._store.list_summaries(111)[0]["last_summarized_message_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_history_passes_before_as_snowflake():
+    """discord.py reads ``before.id``; a bare int raised AttributeError in prod."""
+    seen = {}
+
+    class _Channel:
+        def history(self, **params):
+            seen.update(params)
+            before = params["before"]
+
+            async def _gen():
+                assert before.id == 961
+                return
+                yield  # pragma: no cover
+
+            return _gen()
+
+    await discord_client._collect_history(
+        _Channel(), 10, oldest_first=False, after=None, before=961
+    )
+    assert seen["before"].id == 961

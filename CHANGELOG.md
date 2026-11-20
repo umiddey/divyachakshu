@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 - 2026-11-20
+
+- Fix: the conversation summary worker failed on every run with `AttributeError: 'int' object has no attribute 'id'`, so summaries never updated. History paging now passes the `before` id as a Discord snowflake object.
+
 ## 0.3.3 - 2026-11-20
 
 - Fix: web research failed with `retrieval unavailable: json_line_limit` when a fetched page produced a single JSON event over 128 KiB. The per-line limit is now 1 MiB; the 2 MiB total stdout limit is unchanged.
