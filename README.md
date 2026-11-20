@@ -170,7 +170,7 @@ replacement. Defaults:
 | `environment_mode` | `workstation` | `workstation` or `server`; legacy `auto` fails with a migration error. |
 | `write_mode` | `read-only` | `read-only`, or `docs-only` to allow edit access for documentation paths. |
 | `write_dirs` | `[]` | Directories `docs-only` may write; none usable means it refuses to widen. |
-| `opencode_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids; no repeats and none equal to `opencode_model`. Doctor checks each id. On a provider error (429, 502, 503, 504, other 5xx) or a timeout, the next model runs the same request; the reply ends with `answered by <model>` when a fallback answers. Raw-prompt paths and web research stay on `opencode_model`. |
+| `opencode_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids; no repeats and none equal to `opencode_model`. Doctor checks each id. On a provider error (429, 502, 503, 504, other 5xx) or a timeout, the next model runs the same request; the reply carries no model footer. Raw-prompt paths and web research stay on `opencode_model`. |
 | `opencode_fallback_total_timeout_seconds` | `0` | One wall-clock budget across all attempts, primary included. `0` uses `opencode_timeout_seconds`, so a primary that times out leaves no time for a fallback. A retry starts only if time remains. Docs written by a failed attempt stay on disk and are attached to the answering run. |
 | `omp_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids tried after `omp_model` (or `opencode_model`) on repository replies under `harness = "omp"`. The same provider-error (429, 502, 503, 504, other 5xx) and timeout triggers as `opencode_fallback_models` apply; a non-retryable error does not fall back. Doctor checks each id. |
 | `max_context_messages` | `200` (max 1000) | Bounded history window shown to the model. |
@@ -330,7 +330,7 @@ Python decider before the call and blocks the call on any error, unknown tool, o
 unresolved path. The decider reuses OpenCode's secret patterns and write-directory
 rules. Repository replies on omp try `omp_model` (or `opencode_model`) first, then
 each `omp_fallback_models` entry in order, on a provider error (429, 502, 503, 504,
-other 5xx) or a timeout. A fallback answer ends with `answered by <model>`. A
+other 5xx) or a timeout. A fallback answer carries no model footer. A
 non-retryable error, such as 400, does not fall back. `opencode_fallback_models` is
 not used for omp replies. `oi doctor` still checks OpenCode.
 
