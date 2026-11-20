@@ -110,11 +110,11 @@ uv pip install -e . --force-reinstall --no-deps
 - `opencode/policy.py` — native fail-closed permission map.
 - `opencode/prompt.py` — embedded OI safety/evidence/response contract; open-channel runs get only the minimal plumbing prompt.
 - `opencode/runner.py` — bounded async OpenCode subprocess runner.
-- `opencode/omp.py` — tool-free omp prompt path (`harness = "omp"`); no tools, session, or extensions.
+- `opencode/omp.py` — omp harness (`harness = "omp"`): tool-free prompts, plus repo replies and research through the fail-closed `omp_policy.ts` extension; maps provider errors for `omp_fallback_models`.
 - `watch/discord_client.py` — admission, debounce, and Poster seam.
 - `store.py` — pause, cap, durable queue, and conversation summary state.
 - `daemon.py` — dedicated user and hardened systemd lifecycle.
-- `config.py` — strict OpenCode-only TOML validation and atomic writes.
+- `config.py` — strict TOML validation and atomic writes (OpenCode and omp settings).
 
 ## Durable delivery & queue contract
 
