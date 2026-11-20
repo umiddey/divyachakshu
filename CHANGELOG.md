@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 - 2026-11-20
 
 - New `burst_quiet_seconds` setting (0–300; 0 keeps the built-in 8 s): how long a conversation must stay quiet before its burst of messages is read as one run. Raise it so back-to-back bot posts land in the same run.
 - New `open_channel_max_bot_turns` setting (1-1000, default 40): consecutive bot
