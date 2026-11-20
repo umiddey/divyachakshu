@@ -172,6 +172,7 @@ replacement. Defaults:
 | `write_dirs` | `[]` | Directories `docs-only` may write; none usable means it refuses to widen. |
 | `opencode_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids; no repeats and none equal to `opencode_model`. Doctor checks each id. On a provider error (429, 502, 503, 504, other 5xx) or a timeout, the next model runs the same request; the reply ends with `answered by <model>` when a fallback answers. Raw-prompt paths and web research stay on `opencode_model`. |
 | `opencode_fallback_total_timeout_seconds` | `0` | One wall-clock budget across all attempts, primary included. `0` uses `opencode_timeout_seconds`, so a primary that times out leaves no time for a fallback. A retry starts only if time remains. Docs written by a failed attempt stay on disk and are attached to the answering run. |
+| `omp_fallback_models` | `[]` (max 5) | Ordered `provider/model` ids tried after `omp_model` (or `opencode_model`) on repository replies under `harness = "omp"`. The same provider-error (429, 502, 503, 504, other 5xx) and timeout triggers as `opencode_fallback_models` apply; a non-retryable error does not fall back. Doctor checks each id. |
 | `max_context_messages` | `200` (max 1000) | Bounded history window shown to the model. |
 | `max_context_age_days` | `30` (max 365) | Age cutoff for that window. |
 | `context_messages` | `40` (10–`max_context_messages`) | Newest messages shown to the model alongside the rolling summary. |
@@ -327,8 +328,11 @@ replaced with `[link removed]` and embeds are suppressed.
 Every omp tool call also passes `omp_policy.ts`, a fail-closed shim. It runs the
 Python decider before the call and blocks the call on any error, unknown tool, or
 unresolved path. The decider reuses OpenCode's secret patterns and write-directory
-rules. Repository replies on omp get one attempt; `opencode_fallback_models` is not
-used for omp replies. `oi doctor` still checks OpenCode.
+rules. Repository replies on omp try `omp_model` (or `opencode_model`) first, then
+each `omp_fallback_models` entry in order, on a provider error (429, 502, 503, 504,
+other 5xx) or a timeout. A fallback answer ends with `answered by <model>`. A
+non-retryable error, such as 400, does not fall back. `opencode_fallback_models` is
+not used for omp replies. `oi doctor` still checks OpenCode.
 
 ```bash
 oi config set harness omp
@@ -337,8 +341,9 @@ oi doctor
 ```
 
 Set `omp_model` (a `provider/model` id omp can use) to point omp at a different
-provider from `opencode_model`. It then covers every omp call. Empty means omp uses
-`opencode_model` (or `summary_model` for summaries).
+provider from `opencode_model`. It then covers every omp call and is the first model
+in the omp repository-reply chain, ahead of `omp_fallback_models`. Empty means omp
+uses `opencode_model` (or `summary_model` for summaries).
 
 ### Residual risk with omp
 
@@ -358,8 +363,9 @@ HOME=$HOME/.local/share/oi/omp/home omp login <provider>
 `oi doctor` with `harness = "omp"` checks four things: that
 `omp_policy.ts` is present in the installed package, that omp can list its models
 under the private home, that the configured `omp_model` (or `opencode_model` and
-`summary_model`) is listed, and that OpenCode is still authenticated. A missing
-model prints the exact `omp login` command for its provider.
+`summary_model`) and each `omp_fallback_models` entry is listed, and that OpenCode is
+still authenticated. A missing model prints the exact `omp login` command for its
+provider.
 
 ## Troubleshooting
 

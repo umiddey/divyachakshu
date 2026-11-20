@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- New `omp_fallback_models` setting: an ordered list of `provider/model` ids tried after `omp_model` (or `opencode_model`) for repository replies under `harness = "omp"`. A provider error (429, 502, 503, 504, other 5xx) or a timeout on one model runs the same request on the next. A fallback answer ends with `answered by <model>`. Non-retryable errors such as 400 do not fall back. Empty keeps one attempt.
+- Under `harness = "omp"`, a non-final attempt stops at its first provider error so the next model starts at once. A single-model config keeps omp's own retries. Provider status comes only from omp's integer `errorStatus`; error text is never read.
+- `oi doctor` with `harness = "omp"` checks every `omp_fallback_models` entry against `omp models`.
+- Supersedes the 0.3.0 note that omp replies get one attempt. `opencode_fallback_models` is still not used for omp replies, and OpenCode behaviour is unchanged.
+
 ## 0.3.0 - 2026-11-20
 
 - `harness = "omp"` now runs repository replies, reviews, external evidence, and web research through omp, not only tool-free prompts. Each omp tool call passes `omp_policy.ts`, a fail-closed shim that runs the Python decider and blocks on any error. Reads and writes follow the same secret patterns and write-directory rules as OpenCode.
