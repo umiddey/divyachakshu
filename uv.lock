@@ -275,7 +275,7 @@ wheels = [
 
 [[package]]
 name = "divyachakshu"
-version = "0.2.3"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

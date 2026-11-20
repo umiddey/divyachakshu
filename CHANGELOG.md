@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-20
 
 - `harness = "omp"` now runs repository replies, reviews, external evidence, and web research through omp, not only tool-free prompts. Each omp tool call passes `omp_policy.ts`, a fail-closed shim that runs the Python decider and blocks on any error. Reads and writes follow the same secret patterns and write-directory rules as OpenCode.
 - Under `harness = "omp"`, omp replies get one attempt; `opencode_fallback_models` is not used for omp replies. OpenCode and its fallbacks are unchanged for `harness = "opencode"`.

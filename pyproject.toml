@@ -1,6 +1,6 @@
 [project]
 name = "divyachakshu"
-version = "0.2.3"
+version = "0.3.0"
 description = "Standalone 24/7 Discord feedback-channel respondent with read-only repo auditing"
 readme = "README.md"
 license = "MIT"
