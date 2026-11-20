@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 - 2026-11-20
+
+- Fix: web research failed with `retrieval unavailable: json_line_limit` when a fetched page produced a single JSON event over 128 KiB. The per-line limit is now 1 MiB; the 2 MiB total stdout limit is unchanged.
+- The summary worker now logs a traceback when an update fails, not only the exception class.
+
 ## 0.3.2 - 2026-11-20
 
 - New `burst_quiet_seconds` setting (0–300; 0 keeps the built-in 8 s): how long a conversation must stay quiet before its burst of messages is read as one run. Raise it so back-to-back bot posts land in the same run.
