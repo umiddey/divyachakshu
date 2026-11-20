@@ -482,7 +482,7 @@ def _fake_omp(tmp_path, payload, exit_code):
 
 
 def _omp_doctor(tmp_path, monkeypatch, payload, *, exit_code=0, summary="",
-                authenticated_ok=True, harness="omp"):
+                authenticated_ok=True, harness="omp", omp_fallback_models=()):
     """Build a config with the OpenCode checks stubbed and omp pointed at a fake binary."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -505,6 +505,7 @@ def _omp_doctor(tmp_path, monkeypatch, payload, *, exit_code=0, summary="",
         omp_binary=str(_fake_omp(tmp_path, payload, exit_code)),
         opencode_binary="/bin/true",
         opencode_model="provider/model",
+        omp_fallback_models=list(omp_fallback_models),
         summary_model=summary,
         db_path=str(state_file),
     )
@@ -516,6 +517,28 @@ def test_omp_doctor_passes_when_configured_models_are_listed(tmp_path, monkeypat
     """Both the chat and summary selectors listed by omp means no omp failure."""
     payload = '{"models":[{"selector":"provider/model"},{"selector":"other/summary"}]}'
     cfg = _omp_doctor(tmp_path, monkeypatch, payload, summary="other/summary")
+    assert doctor(cfg) == []
+
+
+def test_omp_doctor_checks_omp_fallback_models(tmp_path, monkeypatch):
+    """An omp_fallback_models entry omp does not list is reported like a chat model."""
+    payload = '{"models":[{"selector":"provider/model"}]}'
+    cfg = _omp_doctor(tmp_path, monkeypatch, payload, omp_fallback_models=["other/fallback"])
+    failures = doctor(cfg)
+    assert any(f.startswith("omp model unavailable: other/fallback;") for f in failures)
+    assert not any(f.startswith("omp model unavailable: provider/model;") for f in failures)
+
+
+def test_omp_doctor_passes_with_fallbacks_listed(tmp_path, monkeypatch):
+    """Chat, summary and fallback selectors all listed by omp means no omp failure."""
+    payload = (
+        '{"models":[{"selector":"provider/model"},{"selector":"other/summary"},'
+        '{"selector":"other/fallback"}]}'
+    )
+    cfg = _omp_doctor(
+        tmp_path, monkeypatch, payload, summary="other/summary",
+        omp_fallback_models=["other/fallback"],
+    )
     assert doctor(cfg) == []
 
 
