@@ -39,6 +39,11 @@ _ASSISTANT = {"type": "message_end", "message": {
     "role": "assistant", "stopReason": "stop",
     "content": [{"type": "text", "text": "ok"}],
 }}
+_RESEARCH = {"type": "message_end", "message": {
+    "role": "assistant", "stopReason": "stop",
+    "content": [{"type": "text", "text": '{"summary": "found it", "sources": ["https://example.com/a"]}'}],
+}}
+
 _EVENTS = {
     "stop": [_ASSISTANT],
     "aborted": [{"type": "message_end", "message": {
@@ -49,6 +54,7 @@ _EVENTS = {
         "content": [{"type": "text", "text": "   "}],
     }}],
     "exit_one": [_ASSISTANT],
+    "research": [_RESEARCH],
 }
 
 
@@ -197,20 +203,35 @@ async def test_omp_cancel_reaps_process(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_omp_harness_routes_tool_free_callers_only(tmp_path, monkeypatch):
-    """Classifier calls use omp; web research never reaches omp."""
+async def test_omp_harness_classifier_stays_tool_free(tmp_path, monkeypatch):
+    """Classifier calls run omp with the tool-free argv."""
     monkeypatch.setenv("HOME", str(tmp_path / "operator"))
-    binary, _ = _omp_script(tmp_path)
+    binary, trace_path = _omp_script(tmp_path)
     runner = OpenCodeRunner(_config(binary))
     assert await runner.classify_web_request("is this a question?") == "ok"
+    argv = json.loads(trace_path.read_text(encoding="utf-8"))["argv"]
+    assert "--no-tools" in argv
 
-    def _forbidden(*_args, **_kwargs):
-        raise AssertionError("omp must not run for web research")
 
-    monkeypatch.setattr("oi_agent.opencode.omp.run_omp_prompt", _forbidden)
-    result = await runner.run_web_research("q", [], max_sources=1)
-    assert result.ok is False
-    assert result.category == "binary_unavailable"
+@pytest.mark.asyncio
+async def test_omp_research_argv_web_tools_only(tmp_path, monkeypatch):
+    """Web research under omp gets web_search and public reads, no repo root, and an empty cwd."""
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    binary, trace_path = _omp_script(tmp_path, "research")
+    runner = OpenCodeRunner(_config(binary))
+    result = await runner.run_web_research("q", ["https://example.com/a"], max_sources=3)
+    assert result.ok is True
+    assert "https://example.com/a" in result.sources
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    argv = trace["argv"]
+    assert argv[argv.index("--tools") + 1] == "read,web_search"
+    assert argv[argv.index("--approval-mode") + 1] == "write"
+    assert argv[argv.index("-e") + 1] == str(OMP_POLICY_SHIM)
+    assert trace["policy"]["mode"] == "research"
+    assert trace["policy"]["write_mode"] == "read-only"
+    assert trace["policy"]["roots"] == []
+    assert "oi-research-cwd-" in trace["cwd"]
+    assert "https://example.com/a" in trace["stdin"]
 
 
 @pytest.mark.asyncio

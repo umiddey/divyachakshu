@@ -1094,21 +1094,23 @@ class OpenCodeRunner:
     ) -> ResearchResult:
         """Run public web research in an empty directory and an isolated home.
 
-        The permission policy allows only websearch and webfetch. No repository,
+        The permission policy allows only web search and page fetches (websearch and
+        webfetch on OpenCode; web_search and read on omp). No repository,
         channel history, or OI secret environment variable is supplied. Every
         listed public URL is fetched; the step and time budget grow with that
         list. A caller-supplied timeout is kept; otherwise it is 180 seconds
         plus 60 seconds per URL.
         """
         try:
-            binary = resolve_runtime_binary(
-                self._cfg.opencode_binary, resolve_opencode_paths()
-            )
+            binary = self._agent_binary()
         except Exception:  # noqa: BLE001 - config/bootstrap boundary
             return ResearchResult(False, category="binary_unavailable")
         link_lines = "\n".join(f"- {url}" for url in urls) or "(none)"
+        search_tool, fetch_tool = (
+            ("web_search", "read") if self._cfg.harness == "omp" else ("websearch", "webfetch")
+        )
         fetch_rule = (
-            "Webfetch every listed URL, one by one, then answer. "
+            f"{fetch_tool.capitalize()} every listed URL, one by one, then answer. "
             "List each retrieved URL in sources. "
             "A URL that fails is reported as failed in the summary, not skipped silently."
         )
@@ -1119,7 +1121,7 @@ class OpenCodeRunner:
             f"{fetch_rule}\n"
         )
         system = (
-            "You research public web pages. Use only websearch and webfetch. "
+            f"You research public web pages. Use only {search_tool} and {fetch_tool}. "
             f"{fetch_rule} "
             "Do not read files, edit, or run commands. "
             "Output one JSON object and nothing else: "
@@ -1128,6 +1130,10 @@ class OpenCodeRunner:
         )
         if timeout is None:
             timeout = RESEARCH_BASE_TIMEOUT_SECONDS + RESEARCH_PER_URL_TIMEOUT_SECONDS * len(urls)
+        if self._cfg.harness == "omp":
+            return await self._omp_research(
+                binary, prompt, system, max_sources=max_sources, timeout=timeout
+            )
         steps = max(1, int(self._cfg.opencode_steps)) + len(urls)
         agent_document = build_research_agent(
             self._cfg.opencode_model, system, steps=steps
@@ -1161,6 +1167,46 @@ class OpenCodeRunner:
             disposable.close()
             import shutil
             shutil.rmtree(cwd, ignore_errors=True)
+
+    async def _omp_research(
+        self,
+        binary: str,
+        prompt: str,
+        system: str,
+        *,
+        max_sources: int,
+        timeout: int,
+    ) -> ResearchResult:
+        """Run one research reply through the policy-gated omp harness.
+
+        The working directory is empty and no root is granted, so the policy
+        allows only web_search and public http(s) reads.
+        """
+        # Local import: omp.py imports this module's helpers at load time.
+        from .omp import omp_select_text, run_omp_agent
+
+        cwd = new_empty_research_dir()
+        try:
+            events, *_, completion = await run_omp_agent(
+                binary,
+                cwd=cwd,
+                roots=[],
+                mode="research",
+                write_mode="read-only",
+                write_dirs=None,
+                system_prompt=system,
+                prompt=prompt,
+                model=self._agent_models()[0],
+                files=[],
+                timeout=timeout,
+            )
+        finally:
+            import shutil
+            shutil.rmtree(cwd, ignore_errors=True)
+        text, _session, error, _parts = omp_select_text(events, completion)
+        if error or not text:
+            return ResearchResult(False, category=error or "empty_response")
+        return parse_research_output(text, max_chars=6000, max_sources=max_sources)
 
     async def _research_process(
         self,
