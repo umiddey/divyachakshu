@@ -310,15 +310,25 @@ replaced with `[link removed]` and embeds are suppressed.
 
 ## Model harness: OpenCode or omp
 
-OpenCode runs every repository reply, research run, and external-evidence task.
-That does not change. `harness` only chooses where tool-free single prompts run:
-the classifier, the context-request fallback, and rolling summaries.
+`harness` chooses which agent does the work. The default stays `opencode`.
 
-- `harness = "opencode"` (default): every prompt goes through OpenCode.
-- `harness = "omp"`: tool-free prompts run through omp in a private environment
-  under `~/.local/share/oi/`. Each call uses `--no-tools`, `--no-session`,
-  `--no-extensions`, `--no-skills`, `--no-rules`, and `--no-context-files`, so
-  the model has no tools and no authority. Repository replies still use OpenCode.
+- `harness = "opencode"` (default): every prompt goes through OpenCode: repository
+  replies, reviews, external evidence, web research, and the tool-free prompts
+  (classifier, context-request fallback, summaries).
+- `harness = "omp"`: omp runs those same jobs in a private environment under
+  `~/.local/share/oi/`:
+  - tool-free prompts run with `--no-tools`, `--no-session`, `--no-extensions`,
+    `--no-skills`, `--no-rules`, and `--no-context-files`, so the model has no
+    tools and no authority;
+  - repository replies get the tools `read`, `grep`, `glob`, `edit`; reviews and
+    external evidence get `read`, `grep`, `glob`; web research gets `read`,
+    `web_search`. Each mode runs with `--no-session` and `--no-extensions`.
+
+Every omp tool call also passes `omp_policy.ts`, a fail-closed shim. It runs the
+Python decider before the call and blocks the call on any error, unknown tool, or
+unresolved path. The decider reuses OpenCode's secret patterns and write-directory
+rules. Repository replies on omp get one attempt; `opencode_fallback_models` is not
+used for omp replies. `oi doctor` still checks OpenCode.
 
 ```bash
 oi config set harness omp
@@ -326,13 +336,30 @@ oi config set omp_binary omp     # default; set a path if omp is not on PATH
 oi doctor
 ```
 
-Set `omp_model` (a `provider/model` id omp can use) when omp and OpenCode use
-different providers. It then covers every omp call and `opencode_model` stays
-the OpenCode model for repository replies. Empty means omp uses `opencode_model`
-(or `summary_model` for summaries). `oi doctor` lists the models omp can use in
-that private environment, fails when the omp model is missing, and prints the
-`omp login` command for that provider. `opencode_fallback_models` stays valid with
-omp, because repository replies still run on OpenCode.
+Set `omp_model` (a `provider/model` id omp can use) to point omp at a different
+provider from `opencode_model`. It then covers every omp call. Empty means omp uses
+`opencode_model` (or `summary_model` for summaries).
+
+### Residual risk with omp
+
+- `glob` can list file names that match secret patterns, as it does under OpenCode.
+- The web read gate checks the hostname as written. A public-looking hostname that
+  resolves to a private address passes the gate. This is an inference from the
+  decider's code and is not covered by a test.
+
+### Login and doctor
+
+Log in once per provider, under the same private home that omp runs in:
+
+```bash
+HOME=$HOME/.local/share/oi/omp/home omp login <provider>
+```
+
+`oi doctor` with `harness = "omp"` checks four things: that
+`omp_policy.ts` is present in the installed package, that omp can list its models
+under the private home, that the configured `omp_model` (or `opencode_model` and
+`summary_model`) is listed, and that OpenCode is still authenticated. A missing
+model prints the exact `omp login` command for its provider.
 
 ## Troubleshooting
 

@@ -565,6 +565,14 @@ def test_omp_doctor_reports_unlistable_omp(tmp_path, monkeypatch):
     assert any("omp models could not be listed" in f for f in doctor(cfg))
 
 
+def test_omp_doctor_fails_without_omp_policy_ts(tmp_path, monkeypatch):
+    """A missing omp_policy.ts fails doctor even when every configured model is listed."""
+    monkeypatch.setattr("oi_agent.daemon.OMP_POLICY_SHIM", tmp_path / "omp_policy.ts")
+    payload = '{"models":[{"selector":"provider/model"}]}'
+    cfg = _omp_doctor(tmp_path, monkeypatch, payload)
+    assert any("omp tool-call policy missing" in f for f in doctor(cfg))
+
+
 def test_omp_doctor_keeps_opencode_checks(tmp_path, monkeypatch):
     """The OpenCode authentication check still runs when harness is omp."""
     payload = '{"models":[{"selector":"provider/model"}]}'

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `harness = "omp"` now runs repository replies, reviews, external evidence, and web research through omp, not only tool-free prompts. Each omp tool call passes `omp_policy.ts`, a fail-closed shim that runs the Python decider and blocks on any error. Reads and writes follow the same secret patterns and write-directory rules as OpenCode.
+- Under `harness = "omp"`, omp replies get one attempt; `opencode_fallback_models` is not used for omp replies. OpenCode and its fallbacks are unchanged for `harness = "opencode"`.
+- `oi doctor` with `harness = "omp"` fails when `omp_policy.ts` is missing from the installed package.
+- Packaging: the wheel ships `oi_agent/opencode/omp_policy.ts` (verified with `uv build`).
+
 ## 0.2.3 - 2026-11-20
 
 - Removed the `answered by <model>` line that was appended when a fallback model answered. Replies are posted as the model wrote them. `reply.model` and the log line still record the answering model.

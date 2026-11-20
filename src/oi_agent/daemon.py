@@ -19,7 +19,7 @@ from .opencode.bootstrap import (
     list_models,
     model_status,
 )
-from .opencode.omp import omp_model_selectors
+from .opencode.omp import OMP_POLICY_SHIM, omp_model_selectors
 from .opencode.paths import resolve_opencode_paths
 from .store import Store
 
@@ -607,11 +607,16 @@ def _omp_model_failures(cfg: Config, home: Path | None) -> list[str]:
     """
     if cfg.harness != "omp":
         return []
+    failures: list[str] = []
+    if not OMP_POLICY_SHIM.is_file():
+        failures.append(
+            f"omp tool-call policy missing: {OMP_POLICY_SHIM}; reinstall oi-agent"
+        )
     paths = resolve_opencode_paths(home, tool="omp")
     selectors = omp_model_selectors(cfg.omp_binary, paths)
     if selectors is None:
-        return [f"omp models could not be listed from: {cfg.omp_binary}"]
-    failures = []
+        failures.append(f"omp models could not be listed from: {cfg.omp_binary}")
+        return failures
     models = [cfg.omp_model] if cfg.omp_model else [cfg.opencode_model, cfg.summary_model or cfg.opencode_model]
     for model in dict.fromkeys(models):
         if model not in selectors:

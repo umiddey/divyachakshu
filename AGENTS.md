@@ -22,11 +22,14 @@ uv pip install -e . --force-reinstall --no-deps
 
 ## Safety invariants — never break these
 
-- OpenCode is the only model/tool/session harness for repository work. Tool-free
-  raw prompts may also run through omp (`harness = "omp"`), always with
-  `--no-tools` and a private environment. Do not add provider HTTP, fallback
-  engines, custom tool loops, manifests, or skills. Do not give omp tools until
-  a reviewed tool-policy extension exists.
+- OpenCode is the default model/tool/session harness. With `harness = "omp"`, omp
+  runs repository replies, reviews, external evidence, and research. Each omp
+  tool call must pass both gates: the per-mode `--tools` allowlist on the argv, and
+  `omp_policy.ts`, which runs the fail-closed decider `oi_agent.opencode.omp_policy`
+  and blocks on any error. Tool-free prompts keep `--no-tools`. Do not widen a mode's
+  tools, or relax the decider, without a reviewed policy change and matching tests in
+  `tests/test_omp_policy.py`. Do not add provider HTTP, fallback engines, custom tool
+  loops, manifests, or skills.
 - Git remote creds are read-scoped only. Never add code that writes/pushes.
 - OpenCode runs with `OPENCODE_DISABLE_PROJECT_CONFIG=1`, isolated HOME/XDG
   roots, an inline native `agent.oi`, and no `--auto`.
