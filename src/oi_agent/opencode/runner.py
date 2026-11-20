@@ -174,8 +174,14 @@ async def _acquire_repo_locks(repo_paths: list[str]) -> AsyncExitStack:
     return stack
 
 
-async def _consume_jsonl(reader: asyncio.StreamReader) -> tuple[list[dict[str, Any]], int]:
-    """Consume bounded JSONL without retaining raw output or evidence."""
+async def _consume_jsonl(
+    reader: asyncio.StreamReader, stop_when: Any = None
+) -> tuple[list[dict[str, Any]], int]:
+    """Consume bounded JSONL without retaining raw output or evidence.
+
+    When ``stop_when`` is given and returns true for an event, reading stops
+    after that event and the events so far are returned.
+    """
     events: list[dict[str, Any]] = []
     total = 0
     pending = b""
@@ -201,6 +207,8 @@ async def _consume_jsonl(reader: asyncio.StreamReader) -> tuple[list[dict[str, A
             if not isinstance(event, dict):
                 raise _ProtocolError("malformed_jsonl")
             events.append(event)
+            if stop_when is not None and stop_when(event):
+                return events, total
     if pending.strip():
         if len(pending) > MAX_JSON_LINE_BYTES:
             raise _ProtocolError("json_line_limit")
@@ -1637,6 +1645,7 @@ class OpenCodeRunner:
                     write_dirs=write_dirs,
                     model=model,
                     timeout_seconds=min(self._cfg.opencode_timeout_seconds, remaining),
+                    stop_on_provider_error=index + 1 < len(models),
                 )
             )
             text, returned_session, event_error, text_parts = self._select_answer(
@@ -1710,9 +1719,12 @@ class OpenCodeRunner:
         return resolve_runtime_binary(self._cfg.opencode_binary, resolve_opencode_paths())
 
     def _agent_models(self) -> list[str]:
-        """Return the attempt chain: omp gets one attempt; OpenCode keeps its fallbacks."""
+        """Return the attempt chain: omp's primary then its fallbacks; OpenCode keeps its fallbacks."""
         if self._cfg.harness == "omp":
-            return [self._cfg.omp_model or self._cfg.opencode_model]
+            return [
+                self._cfg.omp_model or self._cfg.opencode_model,
+                *self._cfg.omp_fallback_models,
+            ]
         return [self._cfg.opencode_model, *self._cfg.opencode_fallback_models]
 
     def _select_answer(
@@ -1765,6 +1777,7 @@ class OpenCodeRunner:
         omp_mode: str = "repo",
         model: str | None = None,
         timeout_seconds: float | None = None,
+        stop_on_provider_error: bool = False,
     ) -> tuple[
         list[dict[str, Any]], int, str, int | None, str | None, int, NativeCompletion
     ]:
@@ -1831,6 +1844,7 @@ class OpenCodeRunner:
                 model=model or self._cfg.omp_model or self._cfg.opencode_model,
                 files=files or [],
                 timeout=timeout,
+                stop_on_provider_error=stop_on_provider_error,
             )
         agent_document = build_agent_config(
             requested_model,

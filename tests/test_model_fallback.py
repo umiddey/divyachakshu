@@ -261,3 +261,13 @@ async def test_empty_fallback_list_is_the_unchanged_single_model_path(tmp_path, 
     assert len(calls) == 1
     assert calls[0]["model"] == PRIMARY
     assert calls[0]["timeout_seconds"] == cfg.opencode_timeout_seconds
+
+
+
+@pytest.mark.asyncio
+async def test_omp_chain_stops_early_only_when_a_fallback_follows(tmp_path, monkeypatch):
+    """Under omp, a non-final attempt may stop at a provider error; the final attempt reads its stream whole."""
+    cfg = _config(harness="omp", omp_binary="/bin/true", omp_fallback_models=list(FALLBACKS))
+    _reply, calls = await _run(tmp_path, monkeypatch, cfg, [_provider_error(429), _provider_error(429), _success()])
+    assert [c["model"] for c in calls] == [PRIMARY, FALLBACKS[0], FALLBACKS[1]]
+    assert [c["stop_on_provider_error"] for c in calls] == [True, True, False]

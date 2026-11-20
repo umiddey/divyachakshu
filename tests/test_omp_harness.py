@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 from oi_agent.config import Config
-from oi_agent.opencode.omp import OMP_POLICY_SHIM, omp_argv, run_omp_agent
+from oi_agent.opencode.omp import OMP_POLICY_SHIM, _omp_provider_error, omp_argv, run_omp_agent
 from oi_agent.opencode.omp_policy import mode_tools
-from oi_agent.opencode.runner import OpenCodeRunner
+from oi_agent.opencode.runner import RETRYABLE_CLASSES, OpenCodeRunner
 
 REQUIRED_FLAGS = (
     "--no-tools", "--no-session", "--no-extensions", "--no-skills",
@@ -376,11 +376,156 @@ async def test_omp_review_scopes_head_and_base_read_only(tmp_path, monkeypatch):
     assert _flag_value(trace["argv"], "--tools") == ",".join(mode_tools("review"))
 
 
-def test_omp_harness_uses_one_attempt_on_omp_model(tmp_path):
-    """omp runs one attempt on omp_model; OpenCode fallback models are never used for omp."""
-    binary, _ = _omp_script(tmp_path)
-    runner = OpenCodeRunner(_config(
-        binary, omp_model="anthropic/claude-haiku-5-5",
-        opencode_fallback_models=["openai/gpt-5.4"],
-    ))
-    assert runner._agent_models() == ["anthropic/claude-haiku-5-5"]
+_FIXTURE = Path(__file__).parent / "fixtures" / "provider_errors" / "omp_429.jsonl"
+
+
+def _fixture_events():
+    """Events of the captured real omp stream for a provider 429."""
+    return [json.loads(line) for line in _FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _failed_turns(events):
+    """Assistant turns that ended in error."""
+    return [e for e in events if isinstance(e.get("message"), dict) and e["message"].get("stopReason") == "error"]
+
+
+def _provider_omp_script(tmp_path, primary, *, status=429, hang=False, recover=False):
+    """Create a fake omp: the primary model replays the 429 stream; other models answer normally.
+
+    ``status`` sets ``errorStatus`` on the failed turns, ``hang`` keeps the process alive after
+    the stream, and ``recover`` appends a completed assistant turn after it.
+    """
+    extra = [_ASSISTANT] if recover else []
+    body = f'''#!{sys.executable}
+import json, sys, time
+model = sys.argv[sys.argv.index("--model") + 1]
+sys.stdin.read()
+if model != {primary!r}:
+    print(json.dumps({_ASSISTANT!r}))
+    sys.exit(0)
+events = [json.loads(line) for line in open({str(_FIXTURE)!r}, encoding="utf-8") if line.strip()]
+for event in events:
+    message = event.get("message")
+    if isinstance(message, dict) and message.get("stopReason") == "error":
+        message["errorStatus"] = {status!r}
+for event in events + {extra!r}:
+    print(json.dumps(event), flush=True)
+if {hang!r}:
+    time.sleep(30)
+sys.exit(0)
+'''
+    path = tmp_path / f"fake-omp-provider-{primary.replace('/', '_')}"
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+async def _omp_attempt(tmp_path, monkeypatch, binary, model, **kwargs):
+    """Run one omp review attempt on ``model`` through the runner's ``_execute_agent``."""
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    runner = OpenCodeRunner(_config(binary))
+    return await runner._execute_agent(
+        binary=str(binary), root=tmp_path, additional_roots=[], prompt_str="sys",
+        prompt="Answer", omp_mode="review", model=model, **kwargs,
+    )
+
+
+def test_omp_probe_fixture_maps_to_provider_429():
+    """The captured omp 429 stream maps to one provider error with its integer status."""
+    assert _omp_provider_error(_fixture_events()) == {
+        "type": "error", "error": {"type": "provider.omp", "status": 429},
+    }
+
+
+def test_omp_error_message_text_is_ignored():
+    """Rate-limit wording in errorMessage never counts; only the integer errorStatus does."""
+    events = _fixture_events()
+    for event in _failed_turns(events):
+        event["message"].pop("errorStatus", None)
+        event["message"]["errorMessage"] = "429 Too Many Requests"
+    assert _omp_provider_error(events) is None
+
+
+def test_omp_missing_or_non_int_errorstatus_does_not_fall_back():
+    """Absent, string, boolean, and out-of-range statuses never trigger a fallback."""
+    for bad in (None, "429", True, 99, 600):
+        events = _fixture_events()
+        for event in _failed_turns(events):
+            if bad is None:
+                event["message"].pop("errorStatus", None)
+            else:
+                event["message"]["errorStatus"] = bad
+        assert _omp_provider_error(events) is None, bad
+
+
+@pytest.mark.asyncio
+async def test_omp_400_does_not_fall_back(tmp_path, monkeypatch):
+    """A non-retryable 400 keeps its non-provider class, so no fallback runs."""
+    binary = _provider_omp_script(tmp_path, "primary/model", status=400)
+    _e, _sb, _ss, _rc, error_class, _dur, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "primary/model",
+        stop_on_provider_error=True, timeout_seconds=15,
+    )
+    assert error_class not in RETRYABLE_CLASSES
+
+
+@pytest.mark.asyncio
+async def test_omp_provider_429_falls_back_to_second_model(tmp_path, monkeypatch):
+    """A 429 on the primary is a retryable provider error; the fallback model then answers."""
+    binary = _provider_omp_script(tmp_path, "primary/model")
+    _e, _sb, _ss, _rc, primary_class, _dur, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "primary/model",
+        stop_on_provider_error=True, timeout_seconds=15,
+    )
+    assert primary_class == "provider_rate_limited"
+    _e, _sb, _ss, _rc, fallback_class, _dur, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "fallback/model",
+        stop_on_provider_error=False, timeout_seconds=15,
+    )
+    assert fallback_class is None
+
+
+@pytest.mark.asyncio
+async def test_omp_early_stop_after_provider_error_falls_back(tmp_path, monkeypatch):
+    """omp is stopped at the provider error instead of waiting out a hung process."""
+    binary = _provider_omp_script(tmp_path, "primary/model", hang=True)
+    _e, _sb, _ss, _rc, error_class, duration_ms, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "primary/model",
+        stop_on_provider_error=True, timeout_seconds=15,
+    )
+    assert error_class == "provider_rate_limited"
+    assert duration_ms < 10_000
+
+
+@pytest.mark.asyncio
+async def test_omp_no_early_stop_without_fallback(tmp_path, monkeypatch):
+    """Without a fallback the whole stream is read, and the 429 is still classed."""
+    binary = _provider_omp_script(tmp_path, "primary/model")
+    events, _sb, _ss, _rc, error_class, _dur, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "primary/model",
+        stop_on_provider_error=False, timeout_seconds=15,
+    )
+    assert error_class == "provider_rate_limited"
+    assert len(events) == len(_fixture_events()) + 1
+
+
+@pytest.mark.asyncio
+async def test_omp_recovered_run_is_not_failed(tmp_path, monkeypatch):
+    """A completed turn after the provider error means the run is not failed."""
+    binary = _provider_omp_script(tmp_path, "primary/model", recover=True)
+    _e, _sb, _ss, _rc, error_class, _dur, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "primary/model",
+        stop_on_provider_error=False, timeout_seconds=15,
+    )
+    assert error_class is None
+
+
+@pytest.mark.asyncio
+async def test_omp_timeout_without_provider_error_stays_timeout(tmp_path, monkeypatch):
+    """A hang with no provider error is still a timeout, not a provider class."""
+    binary, _trace = _omp_script(tmp_path, behavior="sleep")
+    _e, _sb, _ss, _rc, error_class, _dur, _c = await _omp_attempt(
+        tmp_path, monkeypatch, binary, "primary/model",
+        stop_on_provider_error=True, timeout_seconds=1,
+    )
+    assert error_class == "timeout"

@@ -23,7 +23,13 @@ from ..config import _resolve_binary
 from .native import NativeCompletion
 from .omp_policy import mode_tools
 from .paths import OpenCodePaths, resolve_opencode_paths
-from .runner import _consume_jsonl, _consume_stderr, _ProtocolError, _terminate_process
+from .runner import (
+    _consume_jsonl,
+    _consume_stderr,
+    _provider_class,
+    _ProtocolError,
+    _terminate_process,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +143,57 @@ async def run_omp_prompt(
     return _final_answer(events)
 
 
+_OMP_TURN_DONE = frozenset({"stop", "length", "toolUse"})
+
+
+def _omp_provider_status(event: dict[str, Any]) -> int | None:
+    """Return omp's integer ``errorStatus`` for a failed assistant turn, or None.
+
+    Only a real integer from 100 to 599 counts. ``errorMessage`` is never read.
+    """
+    if event.get("type") != "message_end":
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    if message.get("stopReason") != "error":
+        return None
+    status = message.get("errorStatus")
+    if type(status) is int and 100 <= status <= 599:
+        return status
+    return None
+
+
+def _omp_provider_error(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Map omp's last failed assistant turn to a provider error event, or None.
+
+    A later assistant turn that completes (stop, length, toolUse) clears the
+    failure, so a recovered run is not failed.
+    """
+    status: int | None = None
+    for event in events:
+        if event.get("type") != "message_end":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        stop_reason = message.get("stopReason")
+        if stop_reason == "error":
+            status = _omp_provider_status(event)
+        elif stop_reason in _OMP_TURN_DONE:
+            status = None
+    if status is None:
+        return None
+    return {"type": "error", "error": {"type": "provider.omp", "status": status}}
+
+
 async def _collect(
     argv: list[str],
     env: dict[str, str],
     cwd: Path,
     prompt: str,
     timeout: float,
+    stop_on_provider_error: bool = False,
 ) -> tuple[list[dict[str, Any]], int | None, int, str]:
     """Run one omp process; return ``(events, returncode, stderr_bytes, stderr_sample)``.
 
@@ -151,6 +202,14 @@ async def _collect(
     process = None
     stdout_task = None
     stderr_task = None
+    stopped = False
+
+    def stop_when(event: dict[str, Any]) -> bool:
+        nonlocal stopped
+        if _omp_provider_status(event) is not None:
+            stopped = True
+        return stopped
+
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -166,12 +225,18 @@ async def _collect(
         await process.stdin.drain()
         process.stdin.close()
         assert process.stdout is not None and process.stderr is not None
-        stdout_task = asyncio.create_task(_consume_jsonl(process.stdout))
+        stop_when_provider = stop_when if stop_on_provider_error else None
+        stdout_task = asyncio.create_task(_consume_jsonl(process.stdout, stop_when_provider))
         stderr_task = asyncio.create_task(_consume_stderr(process.stderr))
-        await asyncio.wait_for(
-            asyncio.gather(process.wait(), stdout_task, stderr_task),
-            timeout=timeout,
-        )
+
+        async def _drain() -> None:
+            await stdout_task
+            if stopped:
+                await _terminate_process(process)
+            await process.wait()
+            await stderr_task
+
+        await asyncio.wait_for(_drain(), timeout=timeout)
         events, _ = stdout_task.result()
         stderr_bytes, stderr_sample = stderr_task.result()
         return events, process.returncode, stderr_bytes, stderr_sample
@@ -239,6 +304,7 @@ async def run_omp_agent(
     model: str,
     files: list[Path],
     timeout: float,
+    stop_on_provider_error: bool = False,
 ) -> AgentResult:
     """Run one policy-gated omp reply and return the ``_execute_agent`` tuple shape.
 
@@ -271,7 +337,7 @@ async def run_omp_agent(
         argv = _agent_argv(binary, model, system_prompt, max_time, mode_tools(mode), files)
         try:
             events, returncode, stderr_bytes, stderr_sample = await _collect(
-                argv, env, cwd, prompt, timeout
+                argv, env, cwd, prompt, timeout, stop_on_provider_error=stop_on_provider_error
             )
         except asyncio.TimeoutError:
             return _failed_agent("timeout", started)
@@ -285,6 +351,10 @@ async def run_omp_agent(
         error_class = "nonzero_exit"
     elif _final_answer(events) is None:
         error_class = "empty_response"
+    provider_event = _omp_provider_error(events)
+    if provider_event is not None:
+        error_class = _provider_class(provider_event["error"]["status"]) or error_class
+        events = [*events, provider_event]
     completion = NativeCompletion(error_class is None, error_class)
     return events, stderr_bytes, stderr_sample, returncode, error_class, _elapsed_ms(started), completion
 
